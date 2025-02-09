@@ -14,13 +14,13 @@ using System.Reflection;
 
 class Program
 {
-    private const string ServiceBusConnectionString = "Endpoint=sb://sbnspbinstest.servicebus.windows.net/;SharedAccessKeyName=erpnext;SharedAccessKey=<key>";
+    private const string ServiceBusConnectionString = "Endpoint=sb://sbnspbinstest.servicebus.windows.net/;SharedAccessKeyName=erpnext;SharedAccessKey=Gz3sikQhDthPLKx4VRDJZ7y6xSZiV4B7e+ASbIZiPTg=";
     private const string QueueName = "sbq-dom-test";
     private static IQueueClient queueClient;
     private static IWebDriver driver;
 
     // Azure Blob Storage Configuration
-    private const string BlobConnectionString = "DefaultEndpointsProtocol=https;AccountName=stkbprodinskrewbee;AccountKey=<key>;EndpointSuffix=core.windows.net";
+    private const string BlobConnectionString = "DefaultEndpointsProtocol=https;AccountName=stkbprodinskrewbee;AccountKey=VbxIKsr5bZzM73TSdnl3hS8S85XKEv+k6z750+i7PSa5NF8agIHNSZMzfRcxeWRyLo/tqGuZyfmx+ASt7xq4vA==;EndpointSuffix=core.windows.net";
     private const string BlobContainerName = "pleasantbiz-attachments";
 
     static async Task Main(string[] args)
@@ -57,9 +57,10 @@ class Program
 
         string driverPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "chromedriver-win64");
         driver = new ChromeDriver(driverPath, options);  // Path to ChromeDriver
+        
+        // ✅ Open WhatsApp Web only once
         driver.Navigate().GoToUrl("https://web.whatsapp.com/");
-
-        Console.WriteLine("Scan QR Code to log in to WhatsApp Web...");
+        Console.WriteLine("✅ Scan QR Code to log in to WhatsApp Web...");
         Thread.Sleep(20000); // Allow time for scanning
     }
         
@@ -123,23 +124,58 @@ class Program
     {
         try
         {
-            // Open chat with the given phone number
-            string url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
-            driver.Navigate().GoToUrl(url);
+            //// Open chat with the given phone number
+            //string url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
+            //driver.Navigate().GoToUrl(url);
 
             // ✅ WebDriverWait to wait for the chat box to load
             WebDriverWait wait = new WebDriverWait(driver, TimeSpan.FromSeconds(15));
 
-            // ✅ Ensure the chat is open before interacting
-            wait.Until(d =>
-            {
-                var elements = d.FindElements(By.XPath("//div[@contenteditable='true']"));
-                return elements.Count > 0;
-            });
+            //// ✅ Check if we are still on WhatsApp Web
+            //if (!driver.Url.Contains("web.whatsapp.com"))
+            //{
+            //    driver.Navigate().GoToUrl("https://web.whatsapp.com/");
+            //    Thread.Sleep(5000);
+            //}
 
-            var chatInputBox = driver.FindElement(By.XPath("//div[@contenteditable='true']"));
-            chatInputBox.SendKeys(Keys.Enter); // Send the message
+            // ✅ Open a new chat for the given phone number
+            string url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
+            driver.Navigate().GoToUrl(url);
+            Thread.Sleep(5000); // Wait for WhatsApp Web to load the new chat
+
+            // ✅ Wait for the message input box to be visible
+            var chatInputBox = wait.Until(d => d.FindElement(By.XPath("//div[@contenteditable='true']")));
+            chatInputBox.Click();
+            chatInputBox.SendKeys(textMessage);
+            chatInputBox.SendKeys(Keys.Enter);
             Thread.Sleep(3000);
+
+            //// ✅ Use JavaScript to open the chat instead of reloading
+            //var searchBox = wait.Until(d => d.FindElement(By.XPath("//div[@title='Search input textbox']")));
+            //searchBox.Clear();
+            //searchBox.SendKeys(phoneNumber);
+            //Thread.Sleep(3000); // Wait for results
+
+            //var chat = wait.Until(d => d.FindElement(By.XPath("//span[contains(@title, '" + phoneNumber + "')]")));
+            //chat.Click();
+            //Thread.Sleep(3000);
+
+            //// ✅ Send the message
+            //var chatInputBox = wait.Until(d => d.FindElement(By.XPath("//div[@contenteditable='true']")));
+            //chatInputBox.SendKeys(textMessage);
+            //chatInputBox.SendKeys(Keys.Enter);
+            //Thread.Sleep(3000);
+
+            //// ✅ Ensure the chat is open before interacting
+            //wait.Until(d =>
+            //{
+            //    var elements = d.FindElements(By.XPath("//div[@contenteditable='true']"));
+            //    return elements.Count > 0;
+            //});
+
+            //var chatInputBox = driver.FindElement(By.XPath("//div[@contenteditable='true']"));
+            //chatInputBox.SendKeys(Keys.Enter); // Send the message
+            //Thread.Sleep(3000);
 
             // Convert d to jsobject and print
             var js = (IJavaScriptExecutor)driver;
