@@ -9,11 +9,11 @@ namespace WhatsappMessageSender.Services;
 
 public class QueueProcessor : IDisposable
 {
-    private readonly IConfiguration _configuration;
+    private readonly AppSettings _appSettings;
     private readonly WhatsAppService _whatsAppService;
     private readonly BlobStorageService _blobStorageService;
     private readonly ConcurrentDictionary<string, IQueueClient> _queueClients;
-    private readonly int _maxConcurrentCalls;
+    private readonly Dictionary<string, string> _queueContainerMapping;
 
     public QueueProcessor(
         IConfiguration configuration,
@@ -21,33 +21,32 @@ public class QueueProcessor : IDisposable
         BlobStorageService blobStorageService
         )
     {
-        _configuration = configuration;
+        _appSettings = configuration.Get<AppSettings>() 
+            ?? throw new InvalidOperationException("Invalid configuration");
         _whatsAppService = whatsAppService;
         _blobStorageService = blobStorageService;
         _queueClients = new ConcurrentDictionary<string, IQueueClient>();
-        _maxConcurrentCalls = _configuration.GetValue("ServiceBus:MaxConcurrentCalls", 1);
+        _queueContainerMapping = _appSettings.ServiceBus.Queues
+            .ToDictionary(q => q.QueueName, q => q.ContainerName);
     }
 
     public void StartProcessing()
     {
-        var queueNames = _configuration.GetSection("ServiceBus:QueueNames").Get<string[]>() 
-            ?? throw new InvalidOperationException("Queue names not configured");
-        var connectionString = _configuration["ServiceBus:ConnectionString"] 
-            ?? throw new InvalidOperationException("ServiceBus connection string not configured");
+        var connectionString = _appSettings.ServiceBus.ConnectionString;
 
-        foreach (var queueName in queueNames)
+        foreach (var queueConfig in _appSettings.ServiceBus.Queues)
         {
-            var queueClient = new QueueClient(connectionString, queueName);
-            _queueClients.TryAdd(queueName, queueClient);
+            var queueClient = new QueueClient(connectionString, queueConfig.QueueName);
+            _queueClients.TryAdd(queueConfig.QueueName, queueClient);
 
             var messageHandlerOptions = new MessageHandlerOptions(ExceptionReceivedHandler)
             {
-                MaxConcurrentCalls = _maxConcurrentCalls,
+                MaxConcurrentCalls = _appSettings.ServiceBus.MaxConcurrentCalls,
                 AutoComplete = false
             };
 
             queueClient.RegisterMessageHandler(ProcessMessagesAsync, messageHandlerOptions);
-            Console.WriteLine($"Started processing queue: {queueName}");
+            Console.WriteLine($"Started processing queue: {queueConfig.QueueName}");
         }
     }
 
@@ -92,7 +91,9 @@ public class QueueProcessor : IDisposable
                     string? filePath = null;
                     if (!string.IsNullOrEmpty(msg.AttachmentUrl))
                     {
-                        filePath = await _blobStorageService.DownloadFileAsync(msg.AttachmentUrl, msg.Name);
+                        var queueName = _queueClients.FirstOrDefault(x => x.Value == queueClient).Key;
+                        var containerName = _queueContainerMapping[queueName];
+                        filePath = await _blobStorageService.DownloadFileAsync(msg.AttachmentUrl, msg.Name, containerName);
                         await MessageTrackingService.TrackMessageStatusAsync(messageId, "FileDownloaded");
                     }
 

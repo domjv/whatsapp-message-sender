@@ -1,5 +1,7 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using WhatsappMessageSender.Models;
 using WhatsappMessageSender.Services;
 
 namespace WhatsappMessageSender;
@@ -9,8 +11,9 @@ class Program
     static async Task Main(string[] args)
     {
         var host = Host.CreateDefaultBuilder(args)
-            .ConfigureServices((_, services) =>
+            .ConfigureServices((context, services) =>
             {
+                services.Configure<AppSettings>(context.Configuration);
                 services.AddSingleton<WhatsAppService>();
                 services.AddSingleton<BlobStorageService>();
                 services.AddSingleton<MessageTrackingService>();

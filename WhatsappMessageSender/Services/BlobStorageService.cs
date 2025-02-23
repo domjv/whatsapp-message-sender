@@ -3,24 +3,31 @@ namespace WhatsappMessageSender.Services;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Configuration;
 using System.Reflection;
+using WhatsappMessageSender.Models;
 
-public class BlobStorageService(IConfiguration configuration)
+public class BlobStorageService
 {
-    private readonly BlobServiceClient _blobServiceClient = new(configuration["BlobStorage:ConnectionString"]);
-    private readonly string? _containerName = configuration["BlobStorage:ContainerName"];
+    private readonly BlobServiceClient _blobServiceClient;
 
-    public async Task<string> DownloadFileAsync(string blobUrl, string fileName)
+    public BlobStorageService(IConfiguration configuration)
+    {
+        var appSettings = configuration.Get<AppSettings>() 
+            ?? throw new InvalidOperationException("Invalid configuration");
+        _blobServiceClient = new BlobServiceClient(appSettings.BlobStorage.ConnectionString);
+    }
+
+    public async Task<string> DownloadFileAsync(string blobUrl, string fileName, string containerName)
     {
         try
         {
             var path = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? throw new InvalidOperationException();
             var filePath = Path.Combine(path, $"{fileName}.pdf");
 
-            var containerClient = _blobServiceClient.GetBlobContainerClient(_containerName);
+            var containerClient = _blobServiceClient.GetBlobContainerClient(containerName);
             var blobName = new Uri(blobUrl).Segments[^1];
             var blobClient = containerClient.GetBlobClient(blobName);
 
-            Console.WriteLine($"Downloading {blobName} from Blob Storage...");
+            Console.WriteLine($"Downloading {blobName} from Blob Storage container {containerName}...");
             await using var downloadFileStream = File.OpenWrite(filePath);
             await blobClient.DownloadToAsync(downloadFileStream);
 
