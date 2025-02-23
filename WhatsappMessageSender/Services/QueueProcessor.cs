@@ -55,110 +55,105 @@ public class QueueProcessor : IDisposable
 
     private async Task ProcessMessagesAsync(Message message, CancellationToken token)
     {
+        var messageId = message.MessageId;
+        var queueName = message.UserProperties.TryGetValue("QueueName", out var queueNameObj)
+            ? queueNameObj?.ToString() ?? "sbq-pleasntbiz"
+            : "sbq-pleasntbiz";
+
+        if (!_queueClients.TryGetValue(queueName, out var queueClient))
+        {
+            Console.WriteLine($"No queue client found for queue: {queueName}");
+            return;
+        }
+
         try
         {
-            await _processingSemaphore.WaitAsync(token);
-
             var messageBody = Encoding.UTF8.GetString(message.Body);
-            var messageId = message.MessageId;
             var deliveryCount = message.SystemProperties.DeliveryCount;
             
             Console.WriteLine($"Processing message: {messageId} (Attempt {deliveryCount})");
 
-            var queueName = message.UserProperties.TryGetValue("QueueName", out var queueNameObj)
-                ? queueNameObj?.ToString()
-                : "sbq-pleasntbiz";
-
-            var connectionString = _appSettings.ServiceBus.ConnectionString;
-            var queueClient =new QueueClient(connectionString,queueName);
-            try
+            if (deliveryCount > RetrySettings.MaxRetries)
             {
-                if (deliveryCount > RetrySettings.MaxRetries)
+                Console.WriteLine($"Message {messageId} exceeded maximum retries. Moving to dead letter queue.");
+                await queueClient.DeadLetterAsync(message.SystemProperties.LockToken, 
+                    "MaxRetriesExceeded", 
+                    $"Message failed after {RetrySettings.MaxRetries} attempts");
+                return;
+            }
+
+            var messageType = message.UserProperties.TryGetValue("MessageType", out var property)
+                ? property?.ToString() ?? "whatsapp"
+                : "whatsapp";
+
+            var properties = new MessageProperties
+            {
+                MessageType = messageType,
+                QueueName = queueName
+            };
+
+            await MessageTrackingService.TrackMessageStatusAsync(messageId, "Processing");
+
+            if (properties.MessageType.Equals("whatsapp", StringComparison.CurrentCultureIgnoreCase))
+            {
+                var msg = JsonConvert.DeserializeObject<WhatsAppMessage>(messageBody);
+                if (msg == null)
                 {
-                    Console.WriteLine($"Message {messageId} exceeded maximum retries. Moving to dead letter queue.");
+                    await MessageTrackingService.TrackMessageStatusAsync(messageId, "Failed", "Invalid message format");
                     await queueClient.DeadLetterAsync(message.SystemProperties.LockToken, 
-                        "MaxRetriesExceeded", 
-                        $"Message failed after {RetrySettings.MaxRetries} attempts");
+                        "InvalidFormat", 
+                        "Message could not be deserialized");
                     return;
                 }
 
-                var messageType = message.UserProperties.TryGetValue("MessageType", out var property)
-                    ? property?.ToString()
-                    : "whatsapp";
-
-                var properties = new MessageProperties
+                try
                 {
-                    MessageType = messageType ?? "whatsapp",
-                    QueueName = queueName ?? "sbq-pleasntbiz",
-
-                };
-
-                await MessageTrackingService.TrackMessageStatusAsync(messageId, "Processing");
-
-                if (properties.MessageType.Equals("whatsapp", StringComparison.CurrentCultureIgnoreCase))
-                {
-                    var msg = JsonConvert.DeserializeObject<WhatsAppMessage>(messageBody);
-                    if (msg == null)
+                    string? filePath = null;
+                    if (!string.IsNullOrEmpty(msg.AttachmentUrl))
                     {
-                        await MessageTrackingService.TrackMessageStatusAsync(messageId, "Failed", "Invalid message format");
-                        await queueClient.DeadLetterAsync(message.SystemProperties.LockToken, 
-                            "InvalidFormat", 
-                            "Message could not be deserialized");
-                        return;
+                        var containerName = _queueContainerMapping[properties.QueueName];
+                        filePath = await _blobStorageService.DownloadFileAsync(msg.AttachmentUrl, msg.Name, containerName);
+                        await MessageTrackingService.TrackMessageStatusAsync(messageId, "FileDownloaded");
                     }
 
-                    try
+                    var sendResult = await _whatsAppService.SendMessageAsync(msg.Phone, msg.Message, filePath);
+                    
+                    if (sendResult.Success)
                     {
-                        string? filePath = null;
-                        if (!string.IsNullOrEmpty(msg.AttachmentUrl))
-                        {
-                            var containerName = _queueContainerMapping[properties.QueueName];
-                            filePath = await _blobStorageService.DownloadFileAsync(msg.AttachmentUrl, msg.Name, containerName);
-                            await MessageTrackingService.TrackMessageStatusAsync(messageId, "FileDownloaded");
-                        }
-
-                        var sendResult = await _whatsAppService.SendMessageAsync(msg.Phone, msg.Message, filePath);
-                        
-                        if (sendResult.Success)
-                        {
-                            await MessageTrackingService.TrackMessageStatusAsync(messageId, "Delivered");
-                            await SafeCompleteMessageAsync(queueClient, message);
-                        }
-                        else
-                        {
-                            var delay = RetrySettings.GetDelayForRetry(deliveryCount);
-                            await MessageTrackingService.TrackMessageStatusAsync(messageId, "RetryScheduled", 
-                                $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}");
-                            
-                            // Schedule retry with exponential backoff
-                            await queueClient.AbandonAsync(message.SystemProperties.LockToken, 
-                                new Dictionary<string, object>
-                                {
-                                    { "RetryCount", deliveryCount },
-                                    { "LastError", sendResult.Error ?? "Unknown error" }
-                                });
-                        }
+                        await MessageTrackingService.TrackMessageStatusAsync(messageId, "Delivered");
+                        await SafeCompleteMessageAsync(queueClient, message);
+                        Console.WriteLine($"Message {messageId} sent to queue: {queueName}");
                     }
-                    catch (Exception ex)
+                    else
                     {
                         var delay = RetrySettings.GetDelayForRetry(deliveryCount);
                         await MessageTrackingService.TrackMessageStatusAsync(messageId, "RetryScheduled", 
-                            $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}");
+                            $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}");
                         
-                        await SafeAbandonMessageAsync(queueClient, message);
+                        // Schedule retry with exponential backoff
+                        await queueClient.AbandonAsync(message.SystemProperties.LockToken, 
+                            new Dictionary<string, object>
+                            {
+                                { "RetryCount", deliveryCount },
+                                { "LastError", sendResult.Error ?? "Unknown error" }
+                            });
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                await MessageTrackingService.TrackMessageStatusAsync(messageId, "Failed", ex.Message);
-                Console.WriteLine($"Error processing message: {ex.Message}");
-                await SafeAbandonMessageAsync(queueClient, message);
+                catch (Exception ex)
+                {
+                    var delay = RetrySettings.GetDelayForRetry(deliveryCount);
+                    await MessageTrackingService.TrackMessageStatusAsync(messageId, "RetryScheduled", 
+                        $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}");
+                    
+                    await SafeAbandonMessageAsync(queueClient, message);
+                }
             }
         }
-        finally
+        catch (Exception ex)
         {
-            _processingSemaphore.Release();
+            await MessageTrackingService.TrackMessageStatusAsync(messageId, "Failed", ex.Message);
+            Console.WriteLine($"Error processing message: {ex.Message}");
+            await SafeAbandonMessageAsync(queueClient, message);
         }
     }
 
@@ -167,6 +162,7 @@ public class QueueProcessor : IDisposable
         try
         {
             await queueClient.CompleteAsync(message.SystemProperties.LockToken);
+            Console.WriteLine("Message Acknowledged");
         }
         catch (MessageLockLostException ex)
         {
@@ -183,6 +179,7 @@ public class QueueProcessor : IDisposable
         try
         {
             await queueClient.AbandonAsync(message.SystemProperties.LockToken);
+            Console.WriteLine("Message Abandoned");
         }
         catch (MessageLockLostException ex)
         {
