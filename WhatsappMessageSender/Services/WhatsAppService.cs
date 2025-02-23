@@ -46,6 +46,15 @@ public class WhatsAppService : IDisposable
         options.AddArgument("--disable-gpu");
         options.AddArgument("--disable-dev-shm-usage");
         options.AddArgument("--no-sandbox");
+        
+        // Add preferences to prevent download dialog
+        var downloadPath = Path.Combine(Path.GetTempPath(), "WhatsAppDownloads");
+        Directory.CreateDirectory(downloadPath);
+        
+        options.AddUserProfilePreference("download.default_directory", downloadPath);
+        options.AddUserProfilePreference("download.prompt_for_download", false);
+        options.AddUserProfilePreference("download.directory_upgrade", true);
+        options.AddUserProfilePreference("safebrowsing.enabled", true);
 
         if (string.IsNullOrEmpty(driverPath))
         {
@@ -67,12 +76,16 @@ public class WhatsAppService : IDisposable
     {
         try
         {
-           var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(15));
+            var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(15));
 
+            // Navigate and send text message
             var url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
             await _driver.Navigate().GoToUrlAsync(url);
-            Thread.Sleep(5000);
+            
+            // Wait for chat to load
+            await Task.Delay(5000);
 
+            // Send text message
             var chatInputBox = wait.Until(d => d.FindElement(By.XPath("//div[@contenteditable='true' and @aria-placeholder='Type a message']")));
             chatInputBox.Click();
             chatInputBox.SendKeys(Keys.Enter);
@@ -105,10 +118,10 @@ public class WhatsAppService : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"Error sending WhatsApp message: {ex.Message}");
-            return new SendMessageResult
-            {
+            return new SendMessageResult 
+            { 
                 Success = false,
-                Error = "Something went wrong!"
+                Error = ex.Message 
             };
         }
     }

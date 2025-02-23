@@ -40,11 +40,12 @@ public class QueueProcessor : IDisposable
             var queueClient = new QueueClient(connectionString, queueConfig.QueueName);
             _queueClients.TryAdd(queueConfig.QueueName, queueClient);
 
+            queueClient.PrefetchCount = 0;
+
             var messageHandlerOptions = new MessageHandlerOptions(ExceptionReceivedHandler)
             {
-                MaxConcurrentCalls = 1,
-                AutoComplete = false,
-                MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
+                MaxConcurrentCalls = 2,
+                AutoComplete = false
             };
 
             queueClient.RegisterMessageHandler(ProcessMessagesAsync, messageHandlerOptions);

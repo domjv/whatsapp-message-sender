@@ -2,8 +2,7 @@ namespace WhatsappMessageSender.Services;
 
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Configuration;
-using System.Reflection;
-using WhatsappMessageSender.Models;
+using Models;
 
 public class BlobStorageService
 {
@@ -23,7 +22,6 @@ public class BlobStorageService
             var tempDirPath = Path.Combine(Path.GetTempPath(), "BlobDownloads", Guid.NewGuid().ToString());
             Directory.CreateDirectory(tempDirPath);
 
-            // Get file extension from the blob URL or default to .pdf
             var extension = Path.GetExtension(blobUrl);
             if (string.IsNullOrEmpty(extension))
             {
