@@ -31,15 +31,13 @@ public class MessageTrackingService
             message_name = messageId,
             message_status = status,
             message_sent_time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            error_message = error
+            error_message = error ?? string.Empty
         };
 
         try
         {
             var json = JsonSerializer.Serialize(requestBody);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            _httpClient.DefaultRequestHeaders.ExpectContinue = false;
 
             var response = await _httpClient.PostAsync(_settings.ApiUrl, content);
             response.EnsureSuccessStatusCode();
