@@ -31,7 +31,7 @@ public class MessageTrackingService
             message_name = messageId,
             message_status = status,
             message_sent_time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            error_message = error ?? "No error :)"
+            error_message = error ?? ""
         };
 
         try
