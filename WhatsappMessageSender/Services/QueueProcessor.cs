@@ -72,11 +72,10 @@ public class QueueProcessor : IDisposable
 
         if (string.IsNullOrEmpty(messageName))
         {
-            Console.WriteLine($"Message Name is required. Abonding the message");
-            Console.WriteLine($"Message {messageId} exceeded maximum retries. Moving to dead letter queue.");
+            Console.WriteLine($"Message Name is required. Abounding the message");
             await queueClient.DeadLetterAsync(message.SystemProperties.LockToken,
-                "MaxRetriesExceeded",
-                $"Message failed after {RetrySettings.MaxRetries} attempts");
+                "Message Name Not Found",
+                "Message Name is required to send the message");
             return;
         }
 
@@ -101,6 +100,8 @@ public class QueueProcessor : IDisposable
                 await queueClient.DeadLetterAsync(message.SystemProperties.LockToken, 
                     "MaxRetriesExceeded", 
                     $"Message failed after {RetrySettings.MaxRetries} attempts");
+
+                await MessageTrackingService.TrackMessageStatusAsync(properties.MessageName, "Failed", $"Message failed after {RetrySettings.MaxRetries} attempts");
                 return;
             }
 
@@ -140,7 +141,7 @@ public class QueueProcessor : IDisposable
                     else
                     {
                         var delay = RetrySettings.GetDelayForRetry(deliveryCount);
-                        await MessageTrackingService.TrackMessageStatusAsync(properties.MessageName, "RetryScheduled",
+                        await MessageTrackingService.TrackMessageStatusAsync(properties.MessageName, "Retry Scheduled",
                             $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}");
                         
                         // Schedule retry with exponential backoff
@@ -155,7 +156,7 @@ public class QueueProcessor : IDisposable
                 catch (Exception ex)
                 {
                     var delay = RetrySettings.GetDelayForRetry(deliveryCount);
-                    await MessageTrackingService.TrackMessageStatusAsync(properties.MessageName, "RetryScheduled",
+                    await MessageTrackingService.TrackMessageStatusAsync(properties.MessageName, "Retry Scheduled",
                         $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}");
                     
                     await SafeAbandonMessageAsync(queueClient, message);
