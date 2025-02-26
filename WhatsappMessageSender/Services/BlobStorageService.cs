@@ -15,7 +15,7 @@ public class BlobStorageService
         _blobServiceClient = new BlobServiceClient(appSettings.BlobStorage.ConnectionString);
     }
 
-    public async Task<string> DownloadFileAsync(string blobUrl, string fileName, string containerName)
+    public async Task<string?> DownloadFileAsync(string blobUrl, string fileName, string containerName)
     {
         try
         {
@@ -25,7 +25,7 @@ public class BlobStorageService
             var extension = Path.GetExtension(blobUrl);
             if (string.IsNullOrEmpty(extension))
             {
-                extension = ".pdf";
+                return null;
             }
 
             var filePath = Path.Combine(tempDirPath, $"{fileName}{extension}");
