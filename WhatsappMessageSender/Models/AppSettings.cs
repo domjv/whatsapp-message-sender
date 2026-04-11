@@ -2,22 +2,25 @@ namespace WhatsappMessageSender.Models;
 
 public class AppSettings
 {
-    public ServiceBusSettings ServiceBus { get; set; } = null!;
+    public RedisSettings Redis { get; set; } = null!;
     public BlobStorageSettings BlobStorage { get; set; } = null!;
     public WhatsAppSettings WhatsApp { get; set; } = null!;
     public MessageTrackingSettings MessageTracking { get; set; } = null!;
 }
 
-public class ServiceBusSettings
+public class RedisSettings
 {
     public string ConnectionString { get; set; } = null!;
-    public List<QueueConfig> Queues { get; set; } = null!;
-    public int MaxConcurrentCalls { get; set; }
+    public string ConsumerGroup { get; set; } = "whatsapp-sender";
+    public string ConsumerName { get; set; } = Environment.MachineName;
+    public int MaxConcurrentCalls { get; set; } = 2;
+    public int PendingMessageTimeoutSeconds { get; set; } = 300;
+    public List<StreamConfig> Streams { get; set; } = null!;
 }
 
-public class QueueConfig
+public class StreamConfig
 {
-    public string QueueName { get; set; } = null!;
+    public string StreamName { get; set; } = null!;
     public string ContainerName { get; set; } = null!;
 }
 

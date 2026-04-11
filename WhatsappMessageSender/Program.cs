@@ -18,7 +18,7 @@ class Program
                 services.AddSingleton<WhatsAppService>();
                 services.AddSingleton<BlobStorageService>();
                 services.AddSingleton<MessageTrackingService>();
-                services.AddSingleton<QueueProcessor>();
+                services.AddSingleton<RedisStreamProcessor>();
             })
             .Build();
 
@@ -26,12 +26,12 @@ class Program
         var appSettings = host.Services.GetRequiredService<IOptions<AppSettings>>();
         MessageTrackingService.Initialize(appSettings);
 
-        var queueProcessor = host.Services.GetRequiredService<QueueProcessor>();
-        queueProcessor.StartProcessing();
+        var processor = host.Services.GetRequiredService<RedisStreamProcessor>();
+        processor.StartProcessing();
 
         Console.WriteLine("Press any key to exit");
         Console.ReadKey();
 
-        await queueProcessor.CloseAsync();
+        await processor.CloseAsync();
     }
 }
