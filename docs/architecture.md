@@ -3,41 +3,65 @@
 ## Overview
 
 The **WhatsApp Message Sender** is a .NET 9 background worker that consumes
-notification messages from Redis Streams, sends them via WhatsApp Web (Selenium),
-tracks their delivery status, and optionally downloads file attachments from
-Azure Blob Storage.
+notification messages from a configurable message broker (Redis Streams **or**
+Azure Service Bus), sends them via WhatsApp Web (Selenium), tracks delivery
+status, and optionally downloads file attachments from Azure Blob Storage.
+
+The active broker is selected by a single `MessageBroker` setting in
+`appsettings.json`; no code changes are needed to switch between brokers.
 
 ---
 
 ## System Context
 
 ```
-┌───────────────────────┐          ┌──────────────────────┐
-│  Frappe / ERPNext     │  XADD   │      Redis            │
-│  (Python producer)    │────────▶│  Streams + Sorted Set │
-│  + RQ Workers         │         │                       │
-└───────────────────────┘         └──────────┬───────────┘
-                                             │ XREADGROUP
-                                   ┌─────────▼──────────────┐
-                                   │  RedisStreamProcessor   │
-                                   │  (this application)     │
-                                   └──┬───────────┬──────────┘
-                                      │           │
-                              ┌───────▼──┐  ┌─────▼────────────┐
-                              │  WhatsApp│  │  Azure Blob       │
-                              │  Web     │  │  Storage          │
-                              │ (Selenium│  │  (attachments)    │
-                              └───────┬──┘  └─────────────────┘
-                                      │
-                              ┌───────▼──────────────┐
-                              │  Frappe Message       │
-                              │  Tracking API         │
-                              └──────────────────────┘
+┌────────────────────────┐   XADD / Send   ┌────────────────────────┐
+│  Frappe / ERPNext      │────────────────▶│  Redis Streams  (OR)   │
+│  (Python producer      │                 │  Azure Service Bus      │
+│   + RQ Workers)        │                 └───────────┬────────────┘
+└────────────────────────┘                             │ XREADGROUP / RegisterMessageHandler
+                                           ┌───────────▼───────────────────────────┐
+                                           │          IMessageProcessor             │
+                                           │  RedisStreamProcessor (Redis)  OR      │
+                                           │  QueueProcessor       (ServiceBus)     │
+                                           └──┬──────────────────┬─────────────────┘
+                                              │                  │
+                                    ┌─────────▼──┐    ┌──────────▼───────────────┐
+                                    │  WhatsApp  │    │  Azure Blob Storage      │
+                                    │  Web       │    │  (optional attachments)  │
+                                    │ (Selenium) │    └──────────────────────────┘
+                                    └─────────┬──┘
+                                              │
+                                    ┌─────────▼──────────────┐
+                                    │  Frappe Message        │
+                                    │  Tracking API          │
+                                    └────────────────────────┘
 ```
 
 ---
 
-## Delivery Model: RQ + Redis Streams Hybrid
+## Broker Selection
+
+Set `MessageBroker` in `appsettings.json` (or an environment variable) to
+choose the active transport layer. Only the matching configuration block needs
+to be populated.
+
+```json
+{
+  "MessageBroker": "Redis",   // ← or "ServiceBus"
+  "Redis": { ... },
+  "ServiceBus": { ... }
+}
+```
+
+| Value          | Processor class        | Transport          |
+|----------------|------------------------|--------------------|
+| `"Redis"`      | `RedisStreamProcessor` | Redis Streams      |
+| `"ServiceBus"` | `QueueProcessor`       | Azure Service Bus  |
+
+---
+
+## Redis Streams delivery model (RQ + Redis Streams hybrid)
 
 ### Why this combination?
 
@@ -84,82 +108,86 @@ Redis Stream  ──── XREADGROUP ──▶  RedisStreamProcessor
 
 ---
 
-## Components
+## Azure Service Bus delivery model
 
-### `RedisStreamProcessor`
+The `QueueProcessor` uses Service Bus native features:
 
-Core service. Spawns two background tasks per configured stream:
-
-1. **ProcessStreamLoopAsync** – polls `XREADGROUP GROUP … STREAMS … >` for new
-   messages and dispatches them concurrently (up to `MaxConcurrentCalls`).
-2. **RetrySchedulerLoopAsync** – every 10 s checks the `:retries` sorted set for
-   due messages and promotes them back to the stream.
-
-### `WhatsAppService`
-
-Uses Selenium / ChromeDriver to open WhatsApp Web and send messages (with optional
-file attachments). Stateful: the ChromeDriver instance is kept alive for the
-process lifetime.
-
-### `BlobStorageService`
-
-Downloads file attachments from Azure Blob Storage to a temporary local directory
-before passing the file path to `WhatsAppService`.
-
-### `MessageTrackingService`
-
-POSTs status updates (`Processing`, `Delivered`, `Retry Scheduled`, `Failed`) to
-the Frappe Message Tracking API.
+- **Lock-based at-least-once delivery** — messages remain locked until
+  `CompleteAsync` (success) or `AbandonAsync` (retry).
+- **Native retry** — `AbandonAsync` returns the message to the queue; the
+  Service Bus visibility timeout governs the retry interval.
+- **Dead-letter** — after `MaxDeliveryCount` (configurable on the queue) or
+  when the app explicitly calls `DeadLetterAsync`, the message moves to the
+  associated dead-letter queue.
 
 ---
 
-## Configuration (`appsettings.json`)
+## Key abstractions
+
+| Interface                | Implementations                                     | Purpose                                  |
+|--------------------------|-----------------------------------------------------|------------------------------------------|
+| `IMessageProcessor`      | `RedisStreamProcessor`, `QueueProcessor`            | Broker-agnostic consumer lifecycle       |
+| `IWhatsAppService`       | `WhatsAppService` (Selenium)                        | Mockable WhatsApp sender                 |
+| `IBlobStorageService`    | `BlobStorageService` (Azure SDK)                    | Mockable file downloader                 |
+| `IMessageTrackingService`| `MessageTrackingService` (HTTP/Frappe API)          | Mockable status tracker                  |
+
+---
+
+## Configuration reference
+
+### Common settings
 
 ```json
 {
-  "Redis": {
-    "ConnectionString": "localhost:6379",
-    "ConsumerGroup": "whatsapp-sender",
-    "ConsumerName": "whatsapp-sender-1",
-    "MaxConcurrentCalls": 2,
-    "PendingMessageTimeoutSeconds": 300,
-    "Streams": [
-      { "StreamName": "stream-pleasntbiz", "ContainerName": "pleasantbiz-attachments" },
-      { "StreamName": "stream-ivyliving",  "ContainerName": "ivyliving-attachments"  }
-    ]
-  },
-  "BlobStorage": { "ConnectionString": "…" },
-  "WhatsApp":    { "ProfilePath": "…", "ChromeDriverPath": "…" },
+  "MessageBroker": "Redis",
+  "BlobStorage":   { "ConnectionString": "…" },
+  "WhatsApp":      { "ProfilePath": "…", "ChromeDriverPath": "…" },
   "MessageTracking": { "ApiUrl": "…", "AuthToken": "…" }
 }
 ```
 
-| Setting                      | Description                                                    |
-|------------------------------|----------------------------------------------------------------|
-| `ConnectionString`           | Redis connection string (e.g. `host:port,password=…`)         |
-| `ConsumerGroup`              | Consumer group name; shared by all instances of this app       |
-| `ConsumerName`               | Unique name for this instance (defaults to `MachineName`)      |
-| `MaxConcurrentCalls`         | Max parallel message handlers per stream                       |
-| `PendingMessageTimeoutSeconds` | Unused after hybrid redesign (kept for future XCLAIM use)    |
-| `Streams[].StreamName`       | Redis Stream key to consume                                    |
-| `Streams[].ContainerName`    | Azure Blob Storage container for attachments from that stream  |
+### Redis-specific settings
+
+```json
+"Redis": {
+  "ConnectionString":           "localhost:6379",
+  "ConsumerGroup":              "whatsapp-sender",
+  "ConsumerName":               "whatsapp-sender-1",
+  "MaxConcurrentCalls":         2,
+  "PendingMessageTimeoutSeconds": 300,
+  "Streams": [
+    { "StreamName": "stream-pleasntbiz", "ContainerName": "pleasantbiz-attachments" }
+  ]
+}
+```
+
+### Service Bus–specific settings
+
+```json
+"ServiceBus": {
+  "ConnectionString": "Endpoint=sb://…",
+  "MaxConcurrentCalls": 2,
+  "Queues": [
+    { "QueueName": "sbq-pleasntbiz", "ContainerName": "pleasantbiz-attachments" }
+  ]
+}
+```
 
 ---
 
-## Message Format
+## Message format (Redis Streams)
 
 The processor supports two wire formats:
 
 ### 1. JSON `data` field (preferred — produced by Frappe/Python)
 
 ```python
-# Python producer (Frappe/RQ)
 redis.xadd("stream-pleasntbiz", {
     "data": json.dumps({
         "name":           "MSG-00001",
         "phone":          "919876543210",
         "message":        "Hello, your booking is confirmed.",
-        "attachment_url": "https://storage.example.com/…/receipt.pdf",
+        "attachment_url": "https://…/receipt.pdf",
         "message_name":   "MSG-00001"
     }),
     "message_type":  "whatsapp",
@@ -172,24 +200,19 @@ redis.xadd("stream-pleasntbiz", {
 
 ```python
 redis.xadd("stream-pleasntbiz", {
-    "message_type":   "whatsapp",
-    "message_name":   "MSG-00001",
-    "phone":          "919876543210",
-    "message":        "Hello, your booking is confirmed.",
-    "name":           "MSG-00001",
-    "attachment_url": "https://storage.example.com/…/receipt.pdf"
+    "message_type": "whatsapp",
+    "message_name": "MSG-00001",
+    "phone":        "919876543210",
+    "message":      "Hello, your booking is confirmed.",
+    "name":         "MSG-00001"
 })
 ```
 
-### Internal retry fields (added by the processor)
-
-| Field           | Description                               |
-|-----------------|-------------------------------------------|
-| `retry_count`   | Number of times this message has been retried |
+**Note:** `message_name` is required. Messages without it are immediately dead-lettered.
 
 ---
 
-## Retry & Dead-Letter Policy
+## Retry policy
 
 | Setting                         | Default | Description                              |
 |---------------------------------|---------|------------------------------------------|
@@ -201,13 +224,43 @@ Retry delay formula: `min(30 × 2^(retryCount-1), 3600)` seconds.
 
 ---
 
-## Migration from Azure Service Bus
+## Testing without a live broker
 
-See [migration.md](migration.md) for the step-by-step migration guide.
+### Redis Streams — `RedisStreamTestPublisher`
+
+Use the `WhatsappMessageSender.Tools.RedisStreamTestPublisher` class to publish
+test messages directly to a running Redis instance before the Frappe producer is ready.
+
+```csharp
+// Publish a single message
+await RedisStreamTestPublisher.PublishAsync(
+    connectionString: "localhost:6379",
+    streamName: "stream-pleasntbiz",
+    message: new WhatsAppMessage
+    {
+        Name = "MSG-TEST-001", Phone = "919876543210",
+        Message = "Test message.", MessageName = "MSG-TEST-001"
+    });
+
+// Publish all scenario types at once
+await RedisStreamTestPublisher.PublishScenarioSuiteAsync(
+    "localhost:6379", "stream-pleasntbiz");
+```
+
+### Unit tests
+
+Run without any external dependencies:
+
+```bash
+dotnet test WhatsappMessageSender.Tests/WhatsappMessageSender.Tests.csproj
+```
+
+The test suite covers 38 scenarios across both processors using Moq — no real
+Redis instance or Service Bus connection is required.
 
 ---
 
-## Further Improvements
+## Further improvements
 
 See [agent-guide.md](agent-guide.md) for a prioritised list of recommended
-enhancements and implementation guidance.
+enhancements.

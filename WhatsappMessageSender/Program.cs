@@ -3,7 +3,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using WhatsappMessageSender.Models;
 using WhatsappMessageSender.Services;
-using Microsoft.Extensions.Options;
 
 namespace WhatsappMessageSender;
 
@@ -15,18 +14,20 @@ class Program
             .ConfigureServices((context, services) =>
             {
                 services.Configure<AppSettings>(context.Configuration);
-                services.AddSingleton<WhatsAppService>();
-                services.AddSingleton<BlobStorageService>();
-                services.AddSingleton<MessageTrackingService>();
-                services.AddSingleton<RedisStreamProcessor>();
+                services.AddSingleton<IWhatsAppService, WhatsAppService>();
+                services.AddSingleton<IBlobStorageService, BlobStorageService>();
+                services.AddSingleton<IMessageTrackingService, MessageTrackingService>();
+
+                // Select the message processor based on the configured broker
+                var broker = context.Configuration["MessageBroker"] ?? "Redis";
+                if (broker.Equals("ServiceBus", StringComparison.OrdinalIgnoreCase))
+                    services.AddSingleton<IMessageProcessor, QueueProcessor>();
+                else
+                    services.AddSingleton<IMessageProcessor, RedisStreamProcessor>();
             })
             .Build();
 
-        // Initialize MessageTrackingService
-        var appSettings = host.Services.GetRequiredService<IOptions<AppSettings>>();
-        MessageTrackingService.Initialize(appSettings);
-
-        var processor = host.Services.GetRequiredService<RedisStreamProcessor>();
+        var processor = host.Services.GetRequiredService<IMessageProcessor>();
         processor.StartProcessing();
 
         Console.WriteLine("Press any key to exit");

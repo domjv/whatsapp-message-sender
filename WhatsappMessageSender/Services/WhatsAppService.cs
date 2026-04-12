@@ -11,7 +11,7 @@ public class SendMessageResult
     public string? Error { get; set; }
 }
 
-public class WhatsAppService : IDisposable
+public class WhatsAppService : IWhatsAppService, IDisposable
 {
     private readonly ChromeDriver _driver;
     private readonly string _profilePath;

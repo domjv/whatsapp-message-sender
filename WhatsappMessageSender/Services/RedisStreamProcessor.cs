@@ -22,31 +22,64 @@ namespace WhatsappMessageSender.Services;
 ///   4. Retry loop  → promotes due retries back to the stream (XADD + ZREM).
 ///   5. MaxRetries  → XACK + XADD to a dead-letter stream (":dead" suffix).
 /// </summary>
-public class RedisStreamProcessor : IDisposable
+public class RedisStreamProcessor : IMessageProcessor
 {
     private const string DeadLetterSuffix = ":dead";
     private const string RetrySuffix = ":retries";
 
     private readonly AppSettings _appSettings;
-    private readonly WhatsAppService _whatsAppService;
-    private readonly BlobStorageService _blobStorageService;
+    private readonly IWhatsAppService _whatsAppService;
+    private readonly IBlobStorageService _blobStorageService;
+    private readonly IMessageTrackingService _messageTrackingService;
     private readonly Dictionary<string, string> _streamContainerMapping;
 
     private IConnectionMultiplexer? _redis;
-    private IDatabase? _db;
+    // Exposed as internal so the test constructor can inject a mock IDatabase
+    internal IDatabase? _db;
     private readonly CancellationTokenSource _cts = new();
     private readonly List<Task> _runningTasks = [];
 
+    // -------------------------------------------------------------------------
+    // Production constructor (used by DI)
+    // -------------------------------------------------------------------------
+
     public RedisStreamProcessor(
         IConfiguration configuration,
-        WhatsAppService whatsAppService,
-        BlobStorageService blobStorageService)
+        IWhatsAppService whatsAppService,
+        IBlobStorageService blobStorageService,
+        IMessageTrackingService messageTrackingService)
     {
         _appSettings = configuration.Get<AppSettings>()
             ?? throw new InvalidOperationException("Invalid configuration");
+
+        if (_appSettings.Redis == null)
+            throw new InvalidOperationException(
+                "Redis configuration is missing. Set 'MessageBroker' to 'Redis' and provide a 'Redis' config section.");
+
         _whatsAppService = whatsAppService;
         _blobStorageService = blobStorageService;
+        _messageTrackingService = messageTrackingService;
         _streamContainerMapping = _appSettings.Redis.Streams
+            .ToDictionary(s => s.StreamName, s => s.ContainerName);
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal test constructor (allows injecting a mock IDatabase)
+    // -------------------------------------------------------------------------
+
+    internal RedisStreamProcessor(
+        AppSettings appSettings,
+        IWhatsAppService whatsAppService,
+        IBlobStorageService blobStorageService,
+        IMessageTrackingService messageTrackingService,
+        IDatabase database)
+    {
+        _appSettings = appSettings;
+        _whatsAppService = whatsAppService;
+        _blobStorageService = blobStorageService;
+        _messageTrackingService = messageTrackingService;
+        _db = database;
+        _streamContainerMapping = appSettings.Redis!.Streams
             .ToDictionary(s => s.StreamName, s => s.ContainerName);
     }
 
@@ -56,7 +89,7 @@ public class RedisStreamProcessor : IDisposable
 
     public void StartProcessing()
     {
-        _redis = ConnectionMultiplexer.Connect(_appSettings.Redis.ConnectionString);
+        _redis = ConnectionMultiplexer.Connect(_appSettings.Redis!.ConnectionString);
         _db = _redis.GetDatabase();
 
         var group = _appSettings.Redis.ConsumerGroup;
@@ -123,13 +156,12 @@ public class RedisStreamProcessor : IDisposable
     private async Task ProcessStreamLoopAsync(
         string streamName, string group, string consumer, CancellationToken token)
     {
-        var maxConcurrent = _appSettings.Redis.MaxConcurrentCalls;
+        var maxConcurrent = _appSettings.Redis!.MaxConcurrentCalls;
 
         while (!token.IsCancellationRequested)
         {
             try
             {
-                // Read only new (un-delivered) messages with ">" position
                 var entries = await _db!.StreamReadGroupAsync(
                     streamName, group, consumer, ">", count: maxConcurrent);
 
@@ -166,11 +198,10 @@ public class RedisStreamProcessor : IDisposable
         {
             try
             {
-                await Task.Delay(10_000, token); // check every 10 s
+                await Task.Delay(10_000, token);
 
                 var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-                // Fetch all retries whose score (retry-after timestamp) is due
                 var dueEntries = await _db!.SortedSetRangeByScoreWithScoresAsync(
                     retryKey, start: 0, stop: now);
 
@@ -195,7 +226,6 @@ public class RedisStreamProcessor : IDisposable
                         continue;
                     }
 
-                    // Promote back to the stream with the updated retry_count
                     var fields = retry.OriginalData
                         .Select(kv => new NameValueEntry(kv.Key, kv.Value))
                         .Append(new NameValueEntry("retry_count", retry.RetryCount.ToString()))
@@ -204,7 +234,7 @@ public class RedisStreamProcessor : IDisposable
                     await _db.StreamAddAsync(streamName, fields);
                     await _db.SortedSetRemoveAsync(retryKey, json);
                     Console.WriteLine(
-                        $"Re-queued retry #{retry.RetryCount} from '{retryKey}' → '{streamName}'");
+                        $"Re-queued retry #{retry.RetryCount} from '{retryKey}' to '{streamName}'");
                 }
             }
             catch (OperationCanceledException)
@@ -219,14 +249,14 @@ public class RedisStreamProcessor : IDisposable
     }
 
     // -------------------------------------------------------------------------
-    // Message handling
+    // Message handling (internal so unit tests can invoke directly)
     // -------------------------------------------------------------------------
 
-    private async Task HandleMessageAsync(
+    internal async Task HandleMessageAsync(
         string streamName, string group, StreamEntry entry)
     {
         var messageId = entry.Id.ToString();
-        var (messageType, messageName, resolvedStreamName, whatsAppMessage, retryCount) =
+        var (messageType, messageName, resolvedChannelName, whatsAppMessage, retryCount) =
             ExtractMessageData(entry, streamName);
 
         if (string.IsNullOrEmpty(messageName))
@@ -239,7 +269,7 @@ public class RedisStreamProcessor : IDisposable
         var messageProperties = new MessageProperties
         {
             MessageType = messageType,
-            StreamName = resolvedStreamName,
+            ChannelName = resolvedChannelName,
             MessageName = messageName
         };
 
@@ -250,7 +280,7 @@ public class RedisStreamProcessor : IDisposable
             Console.WriteLine($"Message {messageId} exceeded maximum retries. Moving to dead letter.");
             await DeadLetterMessageAsync(streamName, group, entry,
                 $"Message failed after {RetrySettings.MaxRetries} attempts");
-            await MessageTrackingService.TrackMessageStatusAsync(
+            await _messageTrackingService.TrackMessageStatusAsync(
                 messageProperties.MessageName, "Failed",
                 $"Message failed after {RetrySettings.MaxRetries} attempts");
             return;
@@ -258,7 +288,7 @@ public class RedisStreamProcessor : IDisposable
 
         try
         {
-            await MessageTrackingService.TrackMessageStatusAsync(
+            await _messageTrackingService.TrackMessageStatusAsync(
                 messageProperties.MessageName, "Processing");
 
             if (!messageProperties.MessageType.Equals("whatsapp", StringComparison.OrdinalIgnoreCase))
@@ -271,7 +301,7 @@ public class RedisStreamProcessor : IDisposable
 
             if (whatsAppMessage == null)
             {
-                await MessageTrackingService.TrackMessageStatusAsync(
+                await _messageTrackingService.TrackMessageStatusAsync(
                     messageProperties.MessageName, "Failed", "Invalid message format");
                 await DeadLetterMessageAsync(streamName, group, entry,
                     "Message could not be deserialized");
@@ -280,7 +310,7 @@ public class RedisStreamProcessor : IDisposable
 
             string? filePath = null;
             if (!string.IsNullOrEmpty(whatsAppMessage.AttachmentUrl) &&
-                _streamContainerMapping.TryGetValue(messageProperties.StreamName, out var containerName))
+                _streamContainerMapping.TryGetValue(messageProperties.ChannelName, out var containerName))
             {
                 filePath = await _blobStorageService.DownloadFileAsync(
                     whatsAppMessage.AttachmentUrl, whatsAppMessage.Name, containerName);
@@ -291,7 +321,7 @@ public class RedisStreamProcessor : IDisposable
 
             if (sendResult.Success)
             {
-                await MessageTrackingService.TrackMessageStatusAsync(
+                await _messageTrackingService.TrackMessageStatusAsync(
                     messageProperties.MessageName, "Delivered");
                 await _db!.StreamAcknowledgeAsync(streamName, group, entry.Id);
                 Console.WriteLine($"Message {messageId} sent successfully and acknowledged.");
@@ -300,7 +330,7 @@ public class RedisStreamProcessor : IDisposable
             {
                 await ScheduleRetryAsync(streamName, group, entry, retryCount, sendResult.Error);
                 var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
-                await MessageTrackingService.TrackMessageStatusAsync(
+                await _messageTrackingService.TrackMessageStatusAsync(
                     messageProperties.MessageName, "Retry Scheduled",
                     $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}");
             }
@@ -310,17 +340,17 @@ public class RedisStreamProcessor : IDisposable
             Console.WriteLine($"Error processing message {messageId}: {ex.Message}");
             await ScheduleRetryAsync(streamName, group, entry, retryCount, ex.Message);
             var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
-            await MessageTrackingService.TrackMessageStatusAsync(
+            await _messageTrackingService.TrackMessageStatusAsync(
                 messageName, "Retry Scheduled",
                 $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}");
         }
     }
 
     // -------------------------------------------------------------------------
-    // Retry scheduling (XACK + ZADD)
+    // Retry scheduling (XACK + ZADD) — internal for testability
     // -------------------------------------------------------------------------
 
-    private async Task ScheduleRetryAsync(
+    internal async Task ScheduleRetryAsync(
         string streamName, string group, StreamEntry entry, int currentRetryCount, string? error)
     {
         var nextRetry = currentRetryCount + 1;
@@ -330,7 +360,6 @@ public class RedisStreamProcessor : IDisposable
         var originalData = entry.Values
             .ToDictionary(v => v.Name.ToString(), v => v.Value.ToString()!);
 
-        // Strip the old retry_count so the scheduler always uses its own value
         originalData.Remove("retry_count");
 
         var retryEntry = new RetryEntry
@@ -351,10 +380,10 @@ public class RedisStreamProcessor : IDisposable
     }
 
     // -------------------------------------------------------------------------
-    // Dead-letter
+    // Dead-letter — internal for testability
     // -------------------------------------------------------------------------
 
-    private async Task DeadLetterMessageAsync(
+    internal async Task DeadLetterMessageAsync(
         string streamName, string group, StreamEntry entry, string reason)
     {
         var deadLetterStream = streamName + DeadLetterSuffix;
@@ -373,12 +402,12 @@ public class RedisStreamProcessor : IDisposable
     }
 
     // -------------------------------------------------------------------------
-    // Message extraction (supports JSON 'data' field or individual fields)
+    // Message extraction — internal for testability
     // -------------------------------------------------------------------------
 
-    private static (string messageType, string messageName, string streamName,
+    internal static (string messageType, string messageName, string channelName,
         WhatsAppMessage? msg, int retryCount) ExtractMessageData(
-        StreamEntry entry, string defaultStreamName)
+        StreamEntry entry, string defaultChannelName)
     {
         WhatsAppMessage? msg = null;
 
@@ -396,7 +425,7 @@ public class RedisStreamProcessor : IDisposable
             }
         }
 
-        // Fall back to individual fields (phone, message, name, …)
+        // Fall back to individual fields (phone, message, name, ...)
         if (msg == null)
         {
             var phone = (string?)entry["phone"];
@@ -419,19 +448,19 @@ public class RedisStreamProcessor : IDisposable
         }
 
         var messageType = (string?)entry["message_type"] ?? "whatsapp";
-        var messageName = (string?)entry["message_name"] ?? msg?.MessageName ?? msg?.Name ?? string.Empty;
-        var streamName = (string?)entry["stream_name"] ?? defaultStreamName;
+        var messageName = (string?)entry["message_name"] ?? msg?.MessageName ?? string.Empty;
+        var channelName = (string?)entry["stream_name"] ?? defaultChannelName;
 
         int.TryParse((string?)entry["retry_count"], out var retryCount);
 
-        return (messageType, messageName, streamName, msg, retryCount);
+        return (messageType, messageName, channelName, msg, retryCount);
     }
 
     // -------------------------------------------------------------------------
     // Internal types
     // -------------------------------------------------------------------------
 
-    private sealed class RetryEntry
+    internal sealed class RetryEntry
     {
         public int RetryCount { get; set; }
         public string StreamName { get; set; } = string.Empty;

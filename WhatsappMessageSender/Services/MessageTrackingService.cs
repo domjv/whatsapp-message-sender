@@ -5,25 +5,20 @@ using Microsoft.Extensions.Options;
 
 namespace WhatsappMessageSender.Services;
 
-public class MessageTrackingService
+public class MessageTrackingService : IMessageTrackingService
 {
-    private static HttpClient? _httpClient;
-    private static MessageTrackingSettings? _settings;
+    private readonly HttpClient _httpClient;
+    private readonly MessageTrackingSettings _settings;
 
-    public static void Initialize(IOptions<AppSettings> options)
+    public MessageTrackingService(IOptions<AppSettings> options)
     {
         _settings = options.Value.MessageTracking;
         _httpClient = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("Authorization", $"token {_settings.AuthToken}");
     }
 
-    public static async Task TrackMessageStatusAsync(string messageId, string status, string? error = null)
+    public async Task TrackMessageStatusAsync(string messageId, string status, string? error = null)
     {
-        if (_httpClient == null || _settings == null)
-        {
-            throw new InvalidOperationException("MessageTrackingService has not been initialized");
-        }
-
         Console.WriteLine($"Message {messageId} status: {status} {(error != null ? $"Error: {error}" : "")}");
 
         var requestBody = new
@@ -49,4 +44,4 @@ public class MessageTrackingService
             Console.WriteLine($"Failed to update message status: {ex.Message}");
         }
     }
-} 
+}

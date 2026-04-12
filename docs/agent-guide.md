@@ -233,3 +233,39 @@ without writing raw Redis commands.
 | Redis 6.2+ required              | `XAUTOCLAIM` (used internally by StackExchange.Redis) requires Redis 6.2+   |
 | No TLS on Redis                  | Should be enabled for production deployments                                |
 | Polling instead of blocking read | `XREADGROUP BLOCK` is not used; 500 ms polling introduces slight latency    |
+
+---
+
+## Priority 0 — Dual-Broker Support (implemented)
+
+The dual-broker feature is already implemented. Below are notes for agents
+maintaining or extending it.
+
+### Current state
+
+| Area                     | Status     | Notes                                                              |
+|--------------------------|------------|--------------------------------------------------------------------|
+| `IMessageProcessor`      | ✅ Done    | Both processors implement this interface                           |
+| `IWhatsAppService`       | ✅ Done    | Injected; fully mockable                                           |
+| `IBlobStorageService`    | ✅ Done    | Injected; fully mockable                                           |
+| `IMessageTrackingService`| ✅ Done    | Instance service; fully mockable                                   |
+| Redis Streams processor  | ✅ Done    | Consumer group + RQ-style sorted-set retries + dead-letter stream  |
+| Service Bus processor    | ✅ Done    | Lock-based retry; native dead-letter queue                         |
+| Unit tests               | ✅ Done    | 38 tests, 0 external dependencies (Moq-based)                      |
+| `RedisStreamTestPublisher`| ✅ Done   | Utility for manual testing without the Frappe producer             |
+
+### How to add a third broker (e.g., RabbitMQ)
+
+1. Add a `RabbitMqSettings` class to `AppSettings.cs`.
+2. Create `RabbitMqProcessor : IMessageProcessor` in `Services/`.
+3. Register it in `Program.cs` under a new `MessageBroker` value (e.g., `"RabbitMQ"`).
+4. Write unit tests covering the same scenarios as `RedisStreamProcessorTests` and
+   `QueueProcessorTests`.
+5. Update `appsettings.json` with the new broker config block.
+6. Update `docs/architecture.md` and this guide.
+
+### Testing new scenarios
+
+Use the `StreamEntryBuilder` helper in the test project to construct `StreamEntry`
+objects for Redis tests. For Service Bus tests, use `ProcessMessageCoreAsync` with
+plain-string message bodies and `Func<>` delegates.
