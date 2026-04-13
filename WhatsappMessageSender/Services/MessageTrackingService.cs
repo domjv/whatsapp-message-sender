@@ -15,6 +15,8 @@ public class MessageTrackingService : IMessageTrackingService
         var appSettings = options.Value
             ?? throw new InvalidOperationException("AppSettings configuration is missing.");
 
+        // Fail fast with explicit configuration errors to avoid obscure
+        // startup/runtime null-reference failures.
         _settings = appSettings.MessageTracking
             ?? throw new InvalidOperationException(
                 "MessageTracking configuration is missing. Provide 'MessageTracking:ApiUrl' and 'MessageTracking:AuthToken'.");

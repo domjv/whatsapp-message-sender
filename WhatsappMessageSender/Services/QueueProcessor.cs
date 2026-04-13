@@ -27,6 +27,8 @@ public class QueueProcessor : IMessageProcessor
     private readonly IMessageTrackingService _messageTrackingService;
     private readonly ConcurrentDictionary<string, IQueueClient> _queueClients;
     private readonly Dictionary<string, string> _queueContainerMapping;
+    // Selenium/WhatsApp Web driver is single-session and not thread-safe.
+    // Serialize sends even when Service Bus dispatches callbacks concurrently.
     private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
 
     public QueueProcessor(

@@ -33,6 +33,7 @@ public class RedisStreamProcessor : IMessageProcessor
     private readonly IMessageTrackingService _messageTrackingService;
     private readonly Dictionary<string, string> _streamContainerMapping;
     private readonly SemaphoreSlim _globalProcessingSemaphore;
+    // Global one-at-a-time guard for Selenium send calls.
     private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
 
     private IConnectionMultiplexer? _redis;

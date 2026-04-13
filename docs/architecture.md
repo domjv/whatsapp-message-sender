@@ -7,8 +7,14 @@ notification messages from a configurable message broker (Redis Streams **or**
 Azure Service Bus), sends them via WhatsApp Web (Selenium), tracks delivery
 status, and optionally downloads file attachments from Azure Blob Storage.
 
+The worker now runs under the generic host lifecycle (`host.RunAsync`) so it
+starts and stops through `IHostedService` semantics instead of interactive
+console input.
+
 The active broker is selected by a single `MessageBroker` setting in
 `appsettings.json`; no code changes are needed to switch between brokers.
+
+For a step-by-step runtime walkthrough, see `docs/runtime-flow.md`.
 
 ---
 
@@ -120,6 +126,35 @@ The `QueueProcessor` uses Service Bus native features:
   when the app explicitly calls `DeadLetterAsync`, the message moves to the
   associated dead-letter queue.
 
+> **Important:** Although Service Bus can dispatch multiple callbacks in
+> parallel (`MaxConcurrentCalls`), actual Selenium-based sends are serialized
+> with a process-level semaphore to protect the single browser session.
+
+---
+
+## Runtime lifecycle and concurrency model
+
+### Host lifecycle
+
+- `Program.cs` registers a `ProcessorHostedService`.
+- On application start, `ProcessorHostedService.StartAsync` calls
+  `IMessageProcessor.StartProcessing()`.
+- On shutdown (`SIGTERM`, Ctrl+C, orchestrator stop), `StopAsync` awaits
+  `IMessageProcessor.CloseAsync()` to allow a graceful drain.
+
+### Why send operations are serialized
+
+Both processors use one shared `IWhatsAppService` (Selenium/ChromeDriver).
+Concurrent access to one browser driver can corrupt state (active chat tab,
+typed message, attachment context). To prevent that:
+
+- Message fetch and broker-level handling can still run concurrently.
+- The final `SendMessageAsync` call is guarded with `SemaphoreSlim(1,1)`.
+- Result: per-process WhatsApp sends are one-at-a-time and deterministic.
+
+This approach favors correctness over peak throughput for Selenium-based
+automation.
+
 ---
 
 ## Key abstractions
@@ -222,6 +257,13 @@ redis.xadd("stream-pleasntbiz", {
 
 Retry delay formula: `min(30 × 2^(retryCount-1), 3600)` seconds.
 
+### Broker-specific retry behavior
+
+- **Redis Streams path:** delay is enforced by the app via sorted-set
+  scheduling (`:retries` key).
+- **Service Bus path:** delay is **not** app-scheduled. The app abandons the
+  message and Service Bus controls visibility / redelivery timing.
+
 ---
 
 ## Testing without a live broker
@@ -255,8 +297,9 @@ Run without any external dependencies:
 dotnet test WhatsappMessageSender.Tests/WhatsappMessageSender.Tests.csproj
 ```
 
-The test suite covers 38 scenarios across both processors using Moq — no real
-Redis instance or Service Bus connection is required.
+The test suite covers parser, retry/dead-letter paths, config validation, and
+processor happy/error paths across both brokers using Moq — no real Redis
+instance or Service Bus connection is required.
 
 ---
 

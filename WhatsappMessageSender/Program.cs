@@ -13,6 +13,8 @@ class Program
         var host = Host.CreateDefaultBuilder(args)
             .ConfigureServices((context, services) =>
             {
+                // Validate critical settings during startup so the service fails
+                // fast with a clear message instead of crashing after startup.
                 services.AddOptions<AppSettings>()
                     .Bind(context.Configuration)
                     .Validate(settings =>
@@ -39,6 +41,7 @@ class Program
                 else
                     services.AddSingleton<IMessageProcessor, RedisStreamProcessor>();
 
+                // Bridge host lifetime to IMessageProcessor.Start/Close.
                 services.AddHostedService<ProcessorHostedService>();
             })
             .Build();

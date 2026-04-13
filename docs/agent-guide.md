@@ -228,8 +228,8 @@ without writing raw Redis commands.
 
 | Limitation                       | Details                                                                     |
 |----------------------------------|-----------------------------------------------------------------------------|
-| Single ChromeDriver instance     | All streams share one browser session; parallel sending is effectively serial |
-| No XCLAIM / autoclaim for crash recovery | If the process crashes mid-processing, orphaned PEL messages are not reclaimed automatically (retry sorted set handles scheduled retries, but PEL cleanup is not implemented) |
+| Single ChromeDriver instance     | All streams share one browser session; sends are intentionally serialized with a semaphore |
+| Redis reclaim complexity         | New/read/reclaim/retry loops run concurrently, which is reliable but operationally complex to reason about |
 | Redis 6.2+ required              | `XAUTOCLAIM` (used internally by StackExchange.Redis) requires Redis 6.2+   |
 | No TLS on Redis                  | Should be enabled for production deployments                                |
 | Polling instead of blocking read | `XREADGROUP BLOCK` is not used; 500 ms polling introduces slight latency    |
