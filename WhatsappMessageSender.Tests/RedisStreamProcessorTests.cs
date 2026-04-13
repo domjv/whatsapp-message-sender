@@ -446,6 +446,43 @@ public class RedisStreamProcessorTests
         Assert.Null(parsed);
     }
 
+    [Fact]
+    public void TryParseClaimedStreamEntry_ValidMessage_ReturnsStreamEntry()
+    {
+        var raw = (RedisResult)new RedisResult[]
+        {
+            (RedisResult)"1670000000000-1",
+            (RedisResult)new RedisResult[]
+            {
+                (RedisResult)"message_name",
+                (RedisResult)"MSG-CLAIM-001",
+                (RedisResult)"message_type",
+                (RedisResult)"whatsapp"
+            }
+        };
+
+        var success = RedisStreamProcessor.TryParseClaimedStreamEntry(raw, out var parsed);
+
+        Assert.True(success);
+        Assert.NotNull(parsed);
+        Assert.Equal("1670000000000-1", parsed!.Value.Id.ToString());
+        Assert.Equal("MSG-CLAIM-001", parsed.Value["message_name"].ToString());
+    }
+
+    [Fact]
+    public void TryParseClaimedStreamEntry_MalformedMessage_ReturnsFalse()
+    {
+        var raw = (RedisResult)new RedisResult[]
+        {
+            (RedisResult)"1670000000000-2"
+        };
+
+        var success = RedisStreamProcessor.TryParseClaimedStreamEntry(raw, out var parsed);
+
+        Assert.False(success);
+        Assert.Null(parsed);
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

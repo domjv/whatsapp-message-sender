@@ -13,7 +13,21 @@ class Program
         var host = Host.CreateDefaultBuilder(args)
             .ConfigureServices((context, services) =>
             {
-                services.Configure<AppSettings>(context.Configuration);
+                services.AddOptions<AppSettings>()
+                    .Bind(context.Configuration)
+                    .Validate(settings =>
+                    {
+                        if (settings.MessageTracking == null)
+                            return false;
+
+                        if (string.IsNullOrWhiteSpace(settings.MessageTracking.AuthToken))
+                            return false;
+
+                        return Uri.TryCreate(
+                            settings.MessageTracking.ApiUrl, UriKind.Absolute, out _);
+                    },
+                    "MessageTracking must include a valid ApiUrl and AuthToken.")
+                    .ValidateOnStart();
                 services.AddSingleton<IWhatsAppService, WhatsAppService>();
                 services.AddSingleton<IBlobStorageService, BlobStorageService>();
                 services.AddSingleton<IMessageTrackingService, MessageTrackingService>();
@@ -24,15 +38,11 @@ class Program
                     services.AddSingleton<IMessageProcessor, QueueProcessor>();
                 else
                     services.AddSingleton<IMessageProcessor, RedisStreamProcessor>();
+
+                services.AddHostedService<ProcessorHostedService>();
             })
             .Build();
 
-        var processor = host.Services.GetRequiredService<IMessageProcessor>();
-        processor.StartProcessing();
-
-        Console.WriteLine("Press any key to exit");
-        Console.ReadKey();
-
-        await processor.CloseAsync();
+        await host.RunAsync();
     }
 }
