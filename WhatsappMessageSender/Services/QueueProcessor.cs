@@ -177,6 +177,17 @@ public class QueueProcessor : IMessageProcessor
             await _messageTrackingService.TrackMessageStatusAsync(
                 messageProperties.MessageName, "Processing");
 
+            if (!messageProperties.MessageType.Equals("whatsapp", StringComparison.OrdinalIgnoreCase))
+            {
+                await _messageTrackingService.TrackMessageStatusAsync(
+                    messageProperties.MessageName, "Failed",
+                    $"Unsupported message type: {messageProperties.MessageType}");
+                await deadLetterAsync(
+                    "UnsupportedMessageType",
+                    $"Unsupported message type: {messageProperties.MessageType}");
+                return;
+            }
+
             WhatsAppMessage? msg;
             try
             {
@@ -218,10 +229,9 @@ public class QueueProcessor : IMessageProcessor
             }
             else
             {
-                var delay = RetrySettings.GetDelayForRetry(deliveryCount);
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Retry Scheduled",
-                    $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}");
+                    messageProperties.MessageName, "Retry Pending",
+                    $"Will be retried by Service Bus delivery policy. Error: {sendResult.Error}");
                 await abandonAsync(new Dictionary<string, object>
                 {
                     { "RetryCount", deliveryCount },
@@ -231,10 +241,9 @@ public class QueueProcessor : IMessageProcessor
         }
         catch (Exception ex)
         {
-            var delay = RetrySettings.GetDelayForRetry(deliveryCount);
             await _messageTrackingService.TrackMessageStatusAsync(
-                messageName, "Retry Scheduled",
-                $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}");
+                messageName, "Retry Pending",
+                $"Will be retried by Service Bus delivery policy. Error: {ex.Message}");
             await abandonAsync(new Dictionary<string, object>
             {
                 { "RetryCount", deliveryCount },
