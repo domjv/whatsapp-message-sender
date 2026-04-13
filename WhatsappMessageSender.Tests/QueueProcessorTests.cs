@@ -276,7 +276,41 @@ public class QueueProcessorTests
         Assert.False(_completed);
         Assert.Null(_deadLetterReason);
         Assert.NotNull(_abandonedProps);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-FAIL-001", "Retry Scheduled", It.IsAny<string>()), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-FAIL-001", "Retry Pending", It.IsAny<string>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessCore_UnsupportedMessageType_DeadLetters()
+    {
+        // Arrange
+        var msg = new WhatsAppMessage
+        {
+            Name = "MSG-EMAIL-001",
+            Phone = "919000000009",
+            Message = "Should not send",
+            MessageName = "MSG-EMAIL-001"
+        };
+        var processor = CreateProcessor();
+
+        // Act
+        await processor.ProcessMessageCoreAsync(
+            messageId: "msg-id-8",
+            messageBody: Serialize(msg),
+            deliveryCount: 1,
+            queueName: QueueName,
+            messageType: "email",
+            messageName: "MSG-EMAIL-001",
+            completeAsync: CompleteFunc(),
+            deadLetterAsync: DeadLetterFunc(),
+            abandonAsync: AbandonFunc());
+
+        // Assert
+        Assert.Equal("UnsupportedMessageType", _deadLetterReason);
+        Assert.False(_completed);
+        Assert.Null(_abandonedProps);
+        _whatsAppMock.Verify(
+            s => s.SendMessageAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()),
+            Times.Never);
     }
 
     // -------------------------------------------------------------------------
@@ -303,7 +337,7 @@ public class QueueProcessorTests
         // Assert
         Assert.False(_completed);
         Assert.NotNull(_abandonedProps);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-EX-001", "Retry Scheduled", It.Is<string>(s => s!.Contains("Chrome crashed"))), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-EX-001", "Retry Pending", It.Is<string>(s => s!.Contains("Chrome crashed"))), Times.Once);
     }
 
     // -------------------------------------------------------------------------

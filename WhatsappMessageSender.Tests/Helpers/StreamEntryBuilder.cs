@@ -10,9 +10,8 @@ namespace WhatsappMessageSender.Tests.Helpers;
 /// </summary>
 public static class StreamEntryBuilder
 {
-    private static int _idCounter = 1;
-
-    private static string NextId() => $"{_idCounter++}-0";
+    private static string NextId() =>
+        $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Random.Shared.Next(1, int.MaxValue)}";
 
     /// <summary>Builds a valid WhatsApp stream entry using the JSON data field.</summary>
     public static StreamEntry ValidWhatsAppMessage(

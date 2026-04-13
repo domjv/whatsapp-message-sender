@@ -32,6 +32,7 @@ public class RedisStreamProcessor : IMessageProcessor
     private readonly IBlobStorageService _blobStorageService;
     private readonly IMessageTrackingService _messageTrackingService;
     private readonly Dictionary<string, string> _streamContainerMapping;
+    private readonly SemaphoreSlim _globalProcessingSemaphore;
 
     private IConnectionMultiplexer? _redis;
     // Exposed as internal so the test constructor can inject a mock IDatabase
@@ -61,6 +62,8 @@ public class RedisStreamProcessor : IMessageProcessor
         _messageTrackingService = messageTrackingService;
         _streamContainerMapping = _appSettings.Redis.Streams
             .ToDictionary(s => s.StreamName, s => s.ContainerName);
+        _globalProcessingSemaphore = new SemaphoreSlim(
+            Math.Max(1, _appSettings.Redis.MaxConcurrentCalls));
     }
 
     // -------------------------------------------------------------------------
@@ -81,6 +84,8 @@ public class RedisStreamProcessor : IMessageProcessor
         _db = database;
         _streamContainerMapping = appSettings.Redis!.Streams
             .ToDictionary(s => s.StreamName, s => s.ContainerName);
+        _globalProcessingSemaphore = new SemaphoreSlim(
+            Math.Max(1, appSettings.Redis.MaxConcurrentCalls));
     }
 
     // -------------------------------------------------------------------------
@@ -107,6 +112,8 @@ public class RedisStreamProcessor : IMessageProcessor
                 () => ProcessStreamLoopAsync(streamName, group, consumer, token), token));
             _runningTasks.Add(Task.Run(
                 () => RetrySchedulerLoopAsync(streamName, token), token));
+            _runningTasks.Add(Task.Run(
+                () => ReclaimPendingLoopAsync(streamName, group, consumer, token), token));
 
             Console.WriteLine($"Started processing stream: {streamName}");
         }
@@ -172,7 +179,7 @@ public class RedisStreamProcessor : IMessageProcessor
                 }
 
                 await Task.WhenAll(entries.Select(
-                    e => HandleMessageAsync(streamName, group, e)));
+                    e => ProcessEntryWithConcurrencyLimitAsync(streamName, group, e, token)));
             }
             catch (OperationCanceledException)
             {
@@ -182,6 +189,74 @@ public class RedisStreamProcessor : IMessageProcessor
             {
                 Console.WriteLine($"Error reading stream '{streamName}': {ex.Message}");
                 await Task.Delay(5000, token);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Pending message reclaim loop (XAUTOCLAIM)
+    // -------------------------------------------------------------------------
+
+    private async Task ReclaimPendingLoopAsync(
+        string streamName, string group, string consumer, CancellationToken token)
+    {
+        var minIdleMs = Math.Max(1000, _appSettings.Redis!.PendingMessageTimeoutSeconds * 1000);
+        var claimCount = Math.Max(1, _appSettings.Redis.MaxConcurrentCalls);
+
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(10_000, token);
+
+                var result = await _db!.ExecuteAsync(
+                    "XAUTOCLAIM",
+                    streamName,
+                    group,
+                    consumer,
+                    minIdleMs,
+                    "0-0",
+                    "COUNT",
+                    claimCount);
+
+                if (result.IsNull)
+                {
+                    continue;
+                }
+
+                var topLevel = (RedisResult[])result!;
+                if (topLevel.Length < 2 || topLevel[1].IsNull)
+                {
+                    continue;
+                }
+
+                var claimedMessages = (RedisResult[])topLevel[1]!;
+                foreach (var claimedMessage in claimedMessages)
+                {
+                    if (claimedMessage.IsNull)
+                    {
+                        continue;
+                    }
+
+                    var parsed = TryParseClaimedStreamEntry(claimedMessage, out var reclaimedEntry);
+                    if (!parsed || reclaimedEntry == null)
+                    {
+                        continue;
+                    }
+
+                    Console.WriteLine(
+                        $"Reclaimed pending message {reclaimedEntry.Id} from stream '{streamName}'.");
+                    await ProcessEntryWithConcurrencyLimitAsync(
+                        streamName, group, reclaimedEntry.Value, token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error reclaiming pending messages for '{streamName}': {ex.Message}");
             }
         }
     }
@@ -346,6 +421,20 @@ public class RedisStreamProcessor : IMessageProcessor
         }
     }
 
+    private async Task ProcessEntryWithConcurrencyLimitAsync(
+        string streamName, string group, StreamEntry entry, CancellationToken token)
+    {
+        await _globalProcessingSemaphore.WaitAsync(token);
+        try
+        {
+            await HandleMessageAsync(streamName, group, entry);
+        }
+        finally
+        {
+            _globalProcessingSemaphore.Release();
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Retry scheduling (XACK + ZADD) — internal for testability
     // -------------------------------------------------------------------------
@@ -454,6 +543,49 @@ public class RedisStreamProcessor : IMessageProcessor
         int.TryParse((string?)entry["retry_count"], out var retryCount);
 
         return (messageType, messageName, channelName, msg, retryCount);
+    }
+
+    internal static bool TryParseClaimedStreamEntry(
+        RedisResult rawClaimedMessage,
+        out StreamEntry? streamEntry)
+    {
+        streamEntry = null;
+        try
+        {
+            if (rawClaimedMessage.IsNull)
+            {
+                return false;
+            }
+
+            var messageParts = (RedisResult[])rawClaimedMessage!;
+            if (messageParts.Length < 2 || messageParts[0].IsNull || messageParts[1].IsNull)
+            {
+                return false;
+            }
+
+            var messageId = messageParts[0].ToString();
+            var rawFields = (RedisResult[])messageParts[1]!;
+            var fields = new List<NameValueEntry>(rawFields.Length / 2);
+
+            for (var i = 0; i + 1 < rawFields.Length; i += 2)
+            {
+                if (rawFields[i].IsNull || rawFields[i + 1].IsNull)
+                {
+                    continue;
+                }
+
+                fields.Add(new NameValueEntry(
+                    rawFields[i].ToString(),
+                    rawFields[i + 1].ToString()));
+            }
+
+            streamEntry = new StreamEntry(messageId, [.. fields]);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // -------------------------------------------------------------------------
