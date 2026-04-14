@@ -12,7 +12,23 @@ public class MessageTrackingService : IMessageTrackingService
 
     public MessageTrackingService(IOptions<AppSettings> options)
     {
-        _settings = options.Value.MessageTracking;
+        var appSettings = options.Value
+            ?? throw new InvalidOperationException("AppSettings configuration is missing.");
+
+        // Fail fast with explicit configuration errors to avoid obscure
+        // startup/runtime null-reference failures.
+        _settings = appSettings.MessageTracking
+            ?? throw new InvalidOperationException(
+                "MessageTracking configuration is missing. Provide 'MessageTracking:ApiUrl' and 'MessageTracking:AuthToken'.");
+
+        if (string.IsNullOrWhiteSpace(_settings.AuthToken))
+            throw new InvalidOperationException(
+                "MessageTracking:AuthToken is required and cannot be empty.");
+
+        if (!Uri.TryCreate(_settings.ApiUrl, UriKind.Absolute, out _))
+            throw new InvalidOperationException(
+                "MessageTracking:ApiUrl must be a valid absolute URL.");
+
         _httpClient = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("Authorization", $"token {_settings.AuthToken}");
     }

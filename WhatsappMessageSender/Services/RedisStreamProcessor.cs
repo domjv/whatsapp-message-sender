@@ -33,6 +33,8 @@ public class RedisStreamProcessor : IMessageProcessor
     private readonly IMessageTrackingService _messageTrackingService;
     private readonly Dictionary<string, string> _streamContainerMapping;
     private readonly SemaphoreSlim _globalProcessingSemaphore;
+    // Global one-at-a-time guard for Selenium send calls.
+    private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
 
     private IConnectionMultiplexer? _redis;
     // Exposed as internal so the test constructor can inject a mock IDatabase
@@ -391,8 +393,17 @@ public class RedisStreamProcessor : IMessageProcessor
                     whatsAppMessage.AttachmentUrl, whatsAppMessage.Name, containerName);
             }
 
-            var sendResult = await _whatsAppService.SendMessageAsync(
-                whatsAppMessage.Phone, whatsAppMessage.Message, filePath);
+            SendMessageResult sendResult;
+            await _whatsAppSendSemaphore.WaitAsync();
+            try
+            {
+                sendResult = await _whatsAppService.SendMessageAsync(
+                    whatsAppMessage.Phone, whatsAppMessage.Message, filePath);
+            }
+            finally
+            {
+                _whatsAppSendSemaphore.Release();
+            }
 
             if (sendResult.Success)
             {
