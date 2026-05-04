@@ -41,12 +41,14 @@ public class QueueProcessor : IMessageProcessor
     // Selenium/WhatsApp Web driver is single-session and not thread-safe.
     // Serialize sends even when Service Bus dispatches callbacks concurrently.
     private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
+    private readonly IWhatsAppSendRateLimiter _whatsAppSendRateLimiter;
 
     public QueueProcessor(
         IConfiguration configuration,
         IWhatsAppService whatsAppService,
         IBlobStorageService blobStorageService,
-        IMessageTrackingService messageTrackingService)
+        IMessageTrackingService messageTrackingService,
+        IWhatsAppSendRateLimiter whatsAppSendRateLimiter)
     {
         _appSettings = configuration.Get<AppSettings>()
             ?? throw new InvalidOperationException("Invalid configuration");
@@ -58,6 +60,7 @@ public class QueueProcessor : IMessageProcessor
         _whatsAppService = whatsAppService;
         _blobStorageService = blobStorageService;
         _messageTrackingService = messageTrackingService;
+        _whatsAppSendRateLimiter = whatsAppSendRateLimiter;
         _subscriptionClients = new ConcurrentDictionary<string, ISubscriptionClient>();
         _topicContainerMapping = _appSettings.ServiceBus.Topics
             .GroupBy(t => t.TopicName, StringComparer.OrdinalIgnoreCase)
@@ -169,6 +172,7 @@ public class QueueProcessor : IMessageProcessor
         _pendingSignal.Release();
         _pendingSignal.Dispose();
         _cts.Dispose();
+        _whatsAppSendSemaphore.Dispose();
 
         foreach (var subscriptionClient in _subscriptionClients.Values)
         {
@@ -273,6 +277,8 @@ public class QueueProcessor : IMessageProcessor
             ? messageNameObj?.ToString()
             : null;
 
+        var dispatchPriority = ResolvePriority(pending.TopicName);
+
         await ProcessMessageCoreAsync(
             messageId: messageId,
             messageBody: messageBody,
@@ -282,7 +288,9 @@ public class QueueProcessor : IMessageProcessor
             messageName: messageName,
             completeAsync: () => SafeCompleteAsync(pending.ReceiverClient, message),
             deadLetterAsync: (reason, desc) => SafeDeadLetterAsync(pending.ReceiverClient, message, reason, desc),
-            abandonAsync: (props) => SafeAbandonAsync(pending.ReceiverClient, message, props));
+            abandonAsync: (props) => SafeAbandonAsync(pending.ReceiverClient, message, props),
+            dispatchPriority: dispatchPriority,
+            cancellationToken: _cts.Token);
     }
 
     internal async Task ProcessMessageCoreAsync(
@@ -294,7 +302,9 @@ public class QueueProcessor : IMessageProcessor
         string? messageName,
         Func<Task> completeAsync,
         Func<string, string, Task> deadLetterAsync,
-        Func<IDictionary<string, object>, Task> abandonAsync)
+        Func<IDictionary<string, object>, Task> abandonAsync,
+        int dispatchPriority = 0,
+        CancellationToken cancellationToken = default)
     {
         var parsedPayload = ParseMessagePayload(messageBody);
         messageType = ResolveMessageType(messageType, parsedPayload);
@@ -321,6 +331,8 @@ public class QueueProcessor : IMessageProcessor
             return;
         }
 
+        var backendMessageId = ResolveBackendMessageId(messageId, parsedPayload, bodyForName, messageName);
+
         var messageProperties = new MessageProperties
         {
             MessageType = messageType,
@@ -337,8 +349,11 @@ public class QueueProcessor : IMessageProcessor
                 "MaxRetriesExceeded",
                 $"Message failed after {RetrySettings.MaxRetries} attempts");
             await _messageTrackingService.TrackMessageStatusAsync(
-                messageProperties.MessageName, "Failed",
-                $"Message failed after {RetrySettings.MaxRetries} attempts");
+                backendMessageId,
+                "Failed",
+                $"Message failed after {RetrySettings.MaxRetries} attempts",
+                null,
+                null);
             return;
         }
 
@@ -347,8 +362,11 @@ public class QueueProcessor : IMessageProcessor
             if (!messageProperties.MessageType.Equals("whatsapp", StringComparison.OrdinalIgnoreCase))
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Failed",
-                    $"Unsupported message type: {messageProperties.MessageType}");
+                    backendMessageId,
+                    "Failed",
+                    $"Unsupported message type: {messageProperties.MessageType}",
+                    null,
+                    null);
                 await deadLetterAsync(
                     "UnsupportedMessageType",
                     $"Unsupported message type: {messageProperties.MessageType}");
@@ -360,7 +378,7 @@ public class QueueProcessor : IMessageProcessor
             if (msg == null)
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Failed", "Invalid message format");
+                    backendMessageId, "Failed", "Invalid message format", null, null);
                 await deadLetterAsync("InvalidFormat", "Message could not be deserialized");
                 return;
             }
@@ -374,11 +392,16 @@ public class QueueProcessor : IMessageProcessor
             }
 
             SendMessageResult sendResult;
-            await _whatsAppSendSemaphore.WaitAsync();
+            await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
             try
             {
+                await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
                 sendResult = await _whatsAppService.SendMessageAsync(
                     msg.Phone, msg.Message, filePath);
+                if (sendResult.Success)
+                {
+                    _whatsAppSendRateLimiter.NotifySuccessfulSendIfThrottled(dispatchPriority);
+                }
             }
             finally
             {
@@ -387,16 +410,24 @@ public class QueueProcessor : IMessageProcessor
 
             if (sendResult.Success)
             {
+                var deliveredAt = DateTime.UtcNow;
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Sent");
+                    backendMessageId,
+                    "Sent",
+                    null,
+                    sendResult.ProviderMessageId,
+                    deliveredAt);
                 await completeAsync();
                 Console.WriteLine($"Message {messageId} sent via topic: {queueName}");
             }
             else
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Pending",
-                    $"Will be retried by Service Bus delivery policy. Error: {sendResult.Error}");
+                    backendMessageId,
+                    "Pending",
+                    $"Will be retried by Service Bus delivery policy. Error: {sendResult.Error}",
+                    sendResult.ProviderMessageId,
+                    null);
                 await abandonAsync(new Dictionary<string, object>
                 {
                     { "RetryCount", deliveryCount },
@@ -407,8 +438,11 @@ public class QueueProcessor : IMessageProcessor
         catch (Exception ex)
         {
             await _messageTrackingService.TrackMessageStatusAsync(
-                messageName, "Pending",
-                $"Will be retried by Service Bus delivery policy. Error: {ex.Message}");
+                backendMessageId,
+                "Pending",
+                $"Will be retried by Service Bus delivery policy. Error: {ex.Message}",
+                null,
+                null);
             await abandonAsync(new Dictionary<string, object>
             {
                 { "RetryCount", deliveryCount },
@@ -509,6 +543,30 @@ public class QueueProcessor : IMessageProcessor
         return string.IsNullOrWhiteSpace(candidate) ? "whatsapp" : candidate;
     }
 
+    private static string ResolveBackendMessageId(
+        string messageId,
+        ParsedMessagePayload parsedPayload,
+        WhatsAppMessage? bodyMessage,
+        string messageName)
+    {
+        if (!string.IsNullOrWhiteSpace(parsedPayload.BackendMessageId))
+        {
+            return parsedPayload.BackendMessageId!;
+        }
+
+        if (!string.IsNullOrWhiteSpace(bodyMessage?.MessageId))
+        {
+            return bodyMessage.MessageId!;
+        }
+
+        if (!string.IsNullOrWhiteSpace(messageName))
+        {
+            return messageName;
+        }
+
+        return messageId;
+    }
+
     private static string ResolveMessageName(
         string? candidate,
         ParsedMessagePayload parsedPayload,
@@ -552,7 +610,8 @@ public class QueueProcessor : IMessageProcessor
                 return new ParsedMessagePayload(
                     MessageName: payload.MessageId ?? payload.CorrelationId ?? payload.EventName,
                     Channel: payload.Channel,
-                    WhatsAppMessage: null);
+                    WhatsAppMessage: null,
+                    BackendMessageId: payload.MessageId ?? payload.CorrelationId);
             }
 
             var msgName = payload.MessageId ?? payload.CorrelationId ?? payload.EventName;
@@ -565,8 +624,10 @@ public class QueueProcessor : IMessageProcessor
                     Phone = NormalizePhone(payload.RecipientAddress),
                     Message = payload.Body,
                     MessageName = msgName,
+                    MessageId = payload.MessageId,
                     AttachmentUrl = payload.AttachmentUrl
-                });
+                },
+                BackendMessageId: payload.MessageId);
         }
         catch (JsonException)
         {
@@ -591,9 +652,10 @@ public class QueueProcessor : IMessageProcessor
     private sealed record ParsedMessagePayload(
         string? MessageName,
         string? Channel,
-        WhatsAppMessage? WhatsAppMessage)
+        WhatsAppMessage? WhatsAppMessage,
+        string? BackendMessageId)
     {
-        public static readonly ParsedMessagePayload Empty = new(null, null, null);
+        public static readonly ParsedMessagePayload Empty = new(null, null, null, null);
     }
 
     private sealed class ServiceBusNotificationMessage

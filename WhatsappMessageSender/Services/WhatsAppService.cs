@@ -9,6 +9,8 @@ public class SendMessageResult
 {
     public bool Success { get; set; }
     public string? Error { get; set; }
+    /// <summary>Optional provider id (e.g. WhatsApp <c>wamid.*</c>) when available.</summary>
+    public string? ProviderMessageId { get; set; }
 }
 
 public class WhatsAppService : IWhatsAppService, IDisposable
@@ -137,87 +139,86 @@ public class WhatsAppService : IWhatsAppService, IDisposable
     }
 
     public async Task<SendMessageResult> SendMessageAsync(string phoneNumber, string textMessage, string? filePath)
-{
-    try
     {
-        var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(30))
+        try
         {
-            PollingInterval = TimeSpan.FromMilliseconds(500)
-        };
-        wait.IgnoreExceptionTypes(typeof(StaleElementReferenceException), typeof(NoSuchElementException));
+            var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(30))
+            {
+                PollingInterval = TimeSpan.FromMilliseconds(500)
+            };
+            wait.IgnoreExceptionTypes(typeof(StaleElementReferenceException), typeof(NoSuchElementException));
 
-        var url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
-        await _driver.Navigate().GoToUrlAsync(url);
+            var url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
+            await _driver.Navigate().GoToUrlAsync(url);
 
-        var chatInputBox = wait.Until(d => {
-            var element = d.FindElement(By.XPath("//div[@contenteditable='true' and @aria-placeholder='Type a message']"));
-            return element is { Displayed: true, Enabled: true } ? element : null;
-        });
-
-        chatInputBox.Click();
-        chatInputBox.SendKeys(Keys.Enter);
-
-        wait.Until(d => {
-            try {
-                return d.FindElements(By.XPath("//span[@data-icon='msg-time']")).Count == 0;
-            }
-            catch {
-                return false;
-            }
-        });
-
-        if (!string.IsNullOrEmpty(filePath))
-        {
-            var attachButton = wait.Until(d => {
-                var element = d.FindElement(By.XPath("//button[@title='Attach']"));
+            var chatInputBox = wait.Until(d => {
+                var element = d.FindElement(By.XPath("//div[@contenteditable='true' and @aria-placeholder='Type a message']"));
                 return element is { Displayed: true, Enabled: true } ? element : null;
             });
-            attachButton.Click();
 
-            var documentOption = wait.Until(d => {
-                var element = d.FindElement(By.XPath("//span[text()='Document']"));
-                return element is { Displayed: true, Enabled: true } ? element : null;
-            });
-            documentOption.Click();
+            chatInputBox.Click();
+            chatInputBox.SendKeys(Keys.Enter);
 
-            var fileInput = wait.Until(d => d.FindElement(By.XPath("//input[@accept='*']")));
-            fileInput.SendKeys(filePath);
-
-            var sendFileButton = wait.Until(d => {
-                var element = d.FindElement(By.XPath("//div[@aria-label='Send']"));
-                if (!element.Displayed || !element.Enabled) return null;
-
-                var loadingElements = d.FindElements(By.XPath("//div[contains(@class, 'progress')]"));
-                return loadingElements.Count == 0 ? element : null;
-            });
-
-            sendFileButton.Click();
-
-            // Wait for file to be sent successfully
             wait.Until(d => {
                 try {
-                    var sentStatus = d.FindElements(By.XPath("//span[@data-icon='msg-check']"));
-                    return sentStatus.Count != 0;
+                    return d.FindElements(By.XPath("//span[@data-icon='msg-time']")).Count == 0;
                 }
                 catch {
                     return false;
                 }
             });
-        }
 
-        Console.WriteLine($"Message sent to {phoneNumber}");
-        return new SendMessageResult { Success = true };
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Error sending WhatsApp message: {ex.Message}");
-        return new SendMessageResult
+            if (!string.IsNullOrEmpty(filePath))
+            {
+                var attachButton = wait.Until(d => {
+                    var element = d.FindElement(By.XPath("//button[@title='Attach']"));
+                    return element is { Displayed: true, Enabled: true } ? element : null;
+                });
+                attachButton.Click();
+
+                var documentOption = wait.Until(d => {
+                    var element = d.FindElement(By.XPath("//span[text()='Document']"));
+                    return element is { Displayed: true, Enabled: true } ? element : null;
+                });
+                documentOption.Click();
+
+                var fileInput = wait.Until(d => d.FindElement(By.XPath("//input[@accept='*']")));
+                fileInput.SendKeys(filePath);
+
+                var sendFileButton = wait.Until(d => {
+                    var element = d.FindElement(By.XPath("//div[@aria-label='Send']"));
+                    if (!element.Displayed || !element.Enabled) return null;
+
+                    var loadingElements = d.FindElements(By.XPath("//div[contains(@class, 'progress')]"));
+                    return loadingElements.Count == 0 ? element : null;
+                });
+
+                sendFileButton.Click();
+
+                wait.Until(d => {
+                    try {
+                        var sentStatus = d.FindElements(By.XPath("//span[@data-icon='msg-check']"));
+                        return sentStatus.Count != 0;
+                    }
+                    catch {
+                        return false;
+                    }
+                });
+            }
+
+            Console.WriteLine($"Message sent to {phoneNumber}");
+            return new SendMessageResult { Success = true };
+        }
+        catch (Exception ex)
         {
-            Success = false,
-            Error = ex.Message
-        };
+            Console.WriteLine($"Error sending WhatsApp message: {ex.Message}");
+            return new SendMessageResult
+            {
+                Success = false,
+                Error = ex.Message
+            };
+        }
     }
-}
 
     public void Dispose()
     {

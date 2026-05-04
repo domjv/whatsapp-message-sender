@@ -32,6 +32,8 @@ public class RedisStreamProcessor : IMessageProcessor
     private readonly IBlobStorageService _blobStorageService;
     private readonly IMessageTrackingService _messageTrackingService;
     private readonly Dictionary<string, string> _streamContainerMapping;
+    private readonly Dictionary<string, int> _streamPriorityMapping;
+    private readonly IWhatsAppSendRateLimiter _whatsAppSendRateLimiter;
     private readonly SemaphoreSlim _globalProcessingSemaphore;
     // Global one-at-a-time guard for Selenium send calls.
     private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
@@ -50,7 +52,8 @@ public class RedisStreamProcessor : IMessageProcessor
         IConfiguration configuration,
         IWhatsAppService whatsAppService,
         IBlobStorageService blobStorageService,
-        IMessageTrackingService messageTrackingService)
+        IMessageTrackingService messageTrackingService,
+        IWhatsAppSendRateLimiter whatsAppSendRateLimiter)
     {
         _appSettings = configuration.Get<AppSettings>()
             ?? throw new InvalidOperationException("Invalid configuration");
@@ -62,8 +65,11 @@ public class RedisStreamProcessor : IMessageProcessor
         _whatsAppService = whatsAppService;
         _blobStorageService = blobStorageService;
         _messageTrackingService = messageTrackingService;
+        _whatsAppSendRateLimiter = whatsAppSendRateLimiter;
         _streamContainerMapping = _appSettings.Redis.Streams
             .ToDictionary(s => s.StreamName, s => s.ContainerName);
+        _streamPriorityMapping = _appSettings.Redis.Streams
+            .ToDictionary(s => s.StreamName, s => s.Priority);
         _globalProcessingSemaphore = new SemaphoreSlim(
             Math.Max(1, _appSettings.Redis.MaxConcurrentCalls));
     }
@@ -77,15 +83,19 @@ public class RedisStreamProcessor : IMessageProcessor
         IWhatsAppService whatsAppService,
         IBlobStorageService blobStorageService,
         IMessageTrackingService messageTrackingService,
-        IDatabase database)
+        IDatabase database,
+        IWhatsAppSendRateLimiter? whatsAppSendRateLimiter = null)
     {
         _appSettings = appSettings;
         _whatsAppService = whatsAppService;
         _blobStorageService = blobStorageService;
         _messageTrackingService = messageTrackingService;
         _db = database;
+        _whatsAppSendRateLimiter = whatsAppSendRateLimiter ?? NullWhatsAppSendRateLimiter.Instance;
         _streamContainerMapping = appSettings.Redis!.Streams
             .ToDictionary(s => s.StreamName, s => s.ContainerName);
+        _streamPriorityMapping = appSettings.Redis.Streams
+            .ToDictionary(s => s.StreamName, s => s.Priority);
         _globalProcessingSemaphore = new SemaphoreSlim(
             Math.Max(1, appSettings.Redis.MaxConcurrentCalls));
     }
@@ -141,6 +151,8 @@ public class RedisStreamProcessor : IMessageProcessor
         _cts.Cancel();
         _cts.Dispose();
         _redis?.Dispose();
+        _globalProcessingSemaphore.Dispose();
+        _whatsAppSendSemaphore.Dispose();
     }
 
     // -------------------------------------------------------------------------
@@ -334,7 +346,7 @@ public class RedisStreamProcessor : IMessageProcessor
     // -------------------------------------------------------------------------
 
     internal async Task HandleMessageAsync(
-        string streamName, string group, StreamEntry entry)
+        string streamName, string group, StreamEntry entry, CancellationToken cancellationToken = default)
     {
         var messageId = entry.Id.ToString();
         var (messageType, messageName, resolvedChannelName, whatsAppMessage, retryCount) =
@@ -346,6 +358,9 @@ public class RedisStreamProcessor : IMessageProcessor
             await DeadLetterMessageAsync(streamName, group, entry, "MessageName is required");
             return;
         }
+
+        var backendMessageId = messageName;
+        var dispatchPriority = _streamPriorityMapping.GetValueOrDefault(streamName, 100);
 
         var messageProperties = new MessageProperties
         {
@@ -362,8 +377,11 @@ public class RedisStreamProcessor : IMessageProcessor
             await DeadLetterMessageAsync(streamName, group, entry,
                 $"Message failed after {RetrySettings.MaxRetries} attempts");
             await _messageTrackingService.TrackMessageStatusAsync(
-                messageProperties.MessageName, "Failed",
-                $"Message failed after {RetrySettings.MaxRetries} attempts");
+                backendMessageId,
+                "Failed",
+                $"Message failed after {RetrySettings.MaxRetries} attempts",
+                null,
+                null);
             return;
         }
 
@@ -380,11 +398,13 @@ public class RedisStreamProcessor : IMessageProcessor
             if (whatsAppMessage == null)
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Failed", "Invalid message format");
+                    backendMessageId, "Failed", "Invalid message format", null, null);
                 await DeadLetterMessageAsync(streamName, group, entry,
                     "Message could not be deserialized");
                 return;
             }
+
+            backendMessageId = whatsAppMessage.MessageId ?? messageName;
 
             string? filePath = null;
             if (!string.IsNullOrEmpty(whatsAppMessage.AttachmentUrl) &&
@@ -395,11 +415,16 @@ public class RedisStreamProcessor : IMessageProcessor
             }
 
             SendMessageResult sendResult;
-            await _whatsAppSendSemaphore.WaitAsync();
+            await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
             try
             {
+                await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
                 sendResult = await _whatsAppService.SendMessageAsync(
                     whatsAppMessage.Phone, whatsAppMessage.Message, filePath);
+                if (sendResult.Success)
+                {
+                    _whatsAppSendRateLimiter.NotifySuccessfulSendIfThrottled(dispatchPriority);
+                }
             }
             finally
             {
@@ -408,8 +433,13 @@ public class RedisStreamProcessor : IMessageProcessor
 
             if (sendResult.Success)
             {
+                var deliveredAt = DateTime.UtcNow;
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Sent");
+                    backendMessageId,
+                    "Sent",
+                    null,
+                    sendResult.ProviderMessageId,
+                    deliveredAt);
                 await _db!.StreamAcknowledgeAsync(streamName, group, entry.Id);
                 Console.WriteLine($"Message {messageId} sent successfully and acknowledged.");
             }
@@ -418,8 +448,11 @@ public class RedisStreamProcessor : IMessageProcessor
                 await ScheduleRetryAsync(streamName, group, entry, retryCount, sendResult.Error);
                 var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Pending",
-                    $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}");
+                    backendMessageId,
+                    "Pending",
+                    $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}",
+                    sendResult.ProviderMessageId,
+                    null);
             }
         }
         catch (Exception ex)
@@ -428,8 +461,11 @@ public class RedisStreamProcessor : IMessageProcessor
             await ScheduleRetryAsync(streamName, group, entry, retryCount, ex.Message);
             var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
             await _messageTrackingService.TrackMessageStatusAsync(
-                messageName, "Pending",
-                $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}");
+                backendMessageId,
+                "Pending",
+                $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}",
+                null,
+                null);
         }
     }
 
@@ -439,7 +475,7 @@ public class RedisStreamProcessor : IMessageProcessor
         await _globalProcessingSemaphore.WaitAsync(token);
         try
         {
-            await HandleMessageAsync(streamName, group, entry);
+            await HandleMessageAsync(streamName, group, entry, token);
         }
         finally
         {

@@ -7,5 +7,13 @@ namespace WhatsappMessageSender.Services;
 /// </summary>
 public interface IMessageTrackingService
 {
-    Task TrackMessageStatusAsync(string messageId, string status, string? error = null);
+    /// <param name="messageId">Backend <c>message_id</c> (UUID from published payload when available).</param>
+    /// <param name="providerMessageId">Optional provider reference (e.g. WhatsApp <c>wamid.*</c>).</param>
+    /// <param name="deliveredAtUtc">Optional confirmation time for <c>Sent</c> (UTC).</param>
+    Task TrackMessageStatusAsync(
+        string messageId,
+        string status,
+        string? error,
+        string? providerMessageId,
+        DateTime? deliveredAtUtc);
 }

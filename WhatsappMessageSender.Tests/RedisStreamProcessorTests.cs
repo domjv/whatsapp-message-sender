@@ -82,7 +82,8 @@ public class RedisStreamProcessorTests
 
         // Assert
         _whatsAppMock.Verify(s => s.SendMessageAsync("919876543210", "Test message", null), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-001", "Sent", null), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            "MSG-001", "Sent", null, null, It.IsAny<DateTime?>()), Times.Once);
         _dbMock.Verify(d => d.StreamAcknowledgeAsync(StreamName, Group, It.IsAny<RedisValue>(), CommandFlags.None), Times.Once);
     }
 
@@ -107,7 +108,8 @@ public class RedisStreamProcessorTests
 
         // Assert
         _whatsAppMock.Verify(s => s.SendMessageAsync("919876543210", "Test message raw", null), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-RAW-001", "Sent", null), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            "MSG-RAW-001", "Sent", null, null, It.IsAny<DateTime?>()), Times.Once);
     }
 
     // -------------------------------------------------------------------------
@@ -146,7 +148,8 @@ public class RedisStreamProcessorTests
         // Assert
         _blobMock.Verify(b => b.DownloadFileAsync(attachmentUrl, "MSG-ATTACH-001", ContainerName), Times.Once);
         _whatsAppMock.Verify(s => s.SendMessageAsync(It.IsAny<string>(), It.IsAny<string>(), localFilePath), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-ATTACH-001", "Sent", null), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            "MSG-ATTACH-001", "Sent", null, null, It.IsAny<DateTime?>()), Times.Once);
     }
 
     // -------------------------------------------------------------------------
@@ -186,7 +189,8 @@ public class RedisStreamProcessorTests
         // Arrange
         var entry = StreamEntryBuilder.UnsupportedTypeEntry(messageName: "MSG-SMS-001");
         SetupDeadLetterDb();
-        _trackingMock.Setup(t => t.TrackMessageStatusAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+        _trackingMock.Setup(t => t.TrackMessageStatusAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime?>()))
             .Returns(Task.CompletedTask);
 
         var processor = CreateProcessor();
@@ -215,7 +219,8 @@ public class RedisStreamProcessorTests
         // Arrange — bad JSON in data field, no phone/message fallback
         var entry = StreamEntryBuilder.InvalidJsonDataEntry(messageName: "MSG-BAD-001");
         SetupDeadLetterDb();
-        _trackingMock.Setup(t => t.TrackMessageStatusAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+        _trackingMock.Setup(t => t.TrackMessageStatusAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime?>()))
             .Returns(Task.CompletedTask);
 
         var processor = CreateProcessor();
@@ -258,7 +263,8 @@ public class RedisStreamProcessorTests
             It.IsAny<int?>(),
             It.IsAny<bool>(),
             It.IsAny<CommandFlags>()), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-EX-001", "Failed", It.IsAny<string>()), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            "MSG-EX-001", "Failed", It.IsAny<string>(), null, null), Times.Once);
         _whatsAppMock.Verify(s => s.SendMessageAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
     }
 
@@ -290,7 +296,8 @@ public class RedisStreamProcessorTests
             It.IsAny<CommandFlags>()), Times.Once);
         _dbMock.Verify(d => d.StreamAcknowledgeAsync(
             StreamName, Group, It.IsAny<RedisValue>(), CommandFlags.None), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-FAIL-001", "Pending", It.IsAny<string>()), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            "MSG-FAIL-001", "Pending", It.IsAny<string>(), null, null), Times.Once);
     }
 
     [Fact]
@@ -315,7 +322,8 @@ public class RedisStreamProcessorTests
             It.IsAny<double>(),
             It.IsAny<SortedSetWhen>(),
             It.IsAny<CommandFlags>()), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-EX2-001", "Pending", It.IsAny<string>()), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            "MSG-EX2-001", "Pending", It.IsAny<string>(), null, null), Times.Once);
     }
 
     // -------------------------------------------------------------------------
@@ -350,7 +358,8 @@ public class RedisStreamProcessorTests
             It.IsAny<double>(),
             It.IsAny<SortedSetWhen>(),
             It.IsAny<CommandFlags>()), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-BLOB-001", "Pending", It.IsAny<string>()), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            "MSG-BLOB-001", "Pending", It.IsAny<string>(), null, null), Times.Once);
     }
 
     // -------------------------------------------------------------------------

@@ -123,6 +123,11 @@ priority dispatcher:
   `CompleteAsync` (success) or `AbandonAsync` (retry).
 - **Cross-topic priority** — messages from all configured subscriptions are
   enqueued to a shared priority queue; auth topics are processed first.
+- **WhatsApp send rate cap (low priority)** — topics/streams with dispatch
+  priority **≥ `WhatsAppSendRateLimit:HighPriorityLessThan`** (default 10) share a
+  sliding window of at most **`MaxSendsPerMinute`** successful sends (default 20).
+  Priorities **&lt; 10** bypass the cap and proceed immediately when they reach
+  the head of the queue.
 - **Single-send guarantee** — even with multiple subscriptions and concurrent
   callbacks, only one WhatsApp send is executed at a time.
 - **Native retry** — `AbandonAsync` returns the message to the queue; the
@@ -182,7 +187,12 @@ automation.
   "MessageBroker": "Redis",
   "BlobStorage":   { "ConnectionString": "…" },
   "WhatsApp":      { "ProfilePath": "…", "ChromeDriverPath": "…" },
-  "MessageTracking": { "ApiUrl": "…", "NotificationSecret": "…" }
+  "MessageTracking": { "ApiUrl": "…", "NotificationSecret": "…" },
+  "WhatsAppSendRateLimit": {
+    "Enabled": true,
+    "HighPriorityLessThan": 10,
+    "MaxSendsPerMinute": 20
+  }
 }
 ```
 
@@ -221,14 +231,51 @@ automation.
 
 ### Delivery status callback contract
 
-`MessageTrackingService` posts status updates to backend endpoint 1:
+`MessageTrackingService` posts to **POST** `MessageTracking:ApiUrl` (relative path
+`/api/method/hostel_management.api.v1.endpoints.notification_delivery.report_delivery_status`
+on the Frappe site), with:
 
-- header: `X-Notification-Secret: <MessageTracking.NotificationSecret>`
-- body:
-  - `message_id`
-  - `status` (`Sent`, `Failed`, `Pending`)
-  - `error_message` (when failed)
-  - `delivered_at` (when sent)
+- **Headers:** `Content-Type: application/json`, `X-Notification-Secret: <NotificationSecret>`
+- **`message_id`:** UUID from the published JSON `message_id` when present; otherwise falls back to resolved stream/topic identifiers.
+- **Bodies (snake_case JSON):**
+  - **Sent:** `message_id`, `status`, `delivered_at` (UTC as `yyyy-MM-dd HH:mm:ss` for MySQL/Frappe compatibility), optional `provider_message_id`
+  - **Failed:** `message_id`, `status`, `error_message` (required), optional `provider_message_id`
+  - **Pending:** `message_id`, `status`
+
+Non-success HTTP responses log the response body. **404** with `message_id not found` usually means the id sent does not match the row created at publish time.
+
+```mermaid
+flowchart LR
+  subgraph callback [POST report_delivery_status]
+    H[X-Notification-Secret]
+    B[JSON body]
+  end
+  Worker --> callback
+```
+
+### WhatsApp send throttling (`WhatsAppSendRateLimit`)
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `Enabled` | `true` | When `false`, all priorities send without the per-minute cap. |
+| `HighPriorityLessThan` | `10` | Dispatch priorities **strictly below** this value skip the cap (default: **0–9** immediate, **10+** capped). |
+| `MaxSendsPerMinute` | `20` | Max **successful** WhatsApp sends per rolling UTC minute for capped priorities. |
+
+Set `HighPriorityLessThan` to **11** if priority **10** should also bypass the cap (only **11+** throttled).
+
+Redis: each `StreamConfig` may set **`Priority`** (same semantics as Service Bus topic `Priority`).
+
+```mermaid
+flowchart TD
+  R[Message ready to send] --> C{priority less than HighPriorityLessThan?}
+  C -->|yes| S[Send immediately]
+  C -->|no| W[Wait until slot in sliding window]
+  W --> S
+  S --> T{Send OK?}
+  T -->|yes and throttled| N[Record timestamp for cap]
+  T -->|yes| A[Continue]
+  T -->|no| A
+```
 
 ---
 
@@ -285,6 +332,25 @@ Retry delay formula: `min(30 × 2^(retryCount-1), 3600)` seconds.
   scheduling (`:retries` key).
 - **Service Bus path:** delay is **not** app-scheduled. The app abandons the
   message and Service Bus controls visibility / redelivery timing.
+
+---
+
+## Performance, memory, and GC notes
+
+- **In-memory bounds:** The in-process priority queue drains as messages complete; the Service Bus
+  rate limiter keeps at most one minute of timestamps. Backlog beyond that lives on the broker.
+- **HTTP tracking:** `MessageTrackingService` uses a single process-lifetime `HttpClient` (avoid
+  per-call `new HttpClient()`), disposes each `HttpResponseMessage` after the request, sets a request
+  timeout, and implements `IDisposable` so sockets are released on shutdown.
+- **Semaphores:** `QueueProcessor` and `RedisStreamProcessor` dispose `SemaphoreSlim` instances in `Dispose()`.
+- **Blob temp files:** Downloads go under `%TEMP%/BlobDownloads/<guid>/`. Those files are not deleted
+  automatically after send; for sustained attachment traffic, add explicit cleanup after WhatsApp send
+  (or periodic temp sweeping) to avoid disk growth.
+- **Selenium:** One browser session per worker process is intentional; scale out with more processes
+  rather than more concurrent sends in one driver.
+- **GC:** The steady path is low allocation (JSON parse per message). For production hosts, enable
+  **server GC** (`"System.GC.Server": true` in `runtimeconfig.template.json` / project SDK settings, or
+  `DOTNET_gcServer=1`) so generation collections match server workloads.
 
 ---
 

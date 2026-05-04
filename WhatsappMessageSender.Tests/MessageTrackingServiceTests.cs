@@ -37,4 +37,14 @@ public class MessageTrackingServiceTests
         var ex = Assert.Throws<InvalidOperationException>(() => new MessageTrackingService(options));
         Assert.Contains("MessageTracking:ApiUrl", ex.Message);
     }
+
+    [Fact]
+    public void FormatDeliveredAtUtc_UsesMySqlFriendlyUtcString()
+    {
+        var utc = new DateTime(2026, 5, 4, 13, 29, 18, DateTimeKind.Utc);
+        var s = MessageTrackingService.FormatDeliveredAtUtc(utc);
+        Assert.Equal("2026-05-04 13:29:18", s);
+        Assert.DoesNotContain('T', s);
+        Assert.DoesNotContain('Z', s);
+    }
 }

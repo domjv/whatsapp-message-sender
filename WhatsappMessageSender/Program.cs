@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using WhatsappMessageSender.Models;
 using WhatsappMessageSender.Services;
 
@@ -33,6 +34,15 @@ class Program
                 services.AddSingleton<IWhatsAppService, WhatsAppService>();
                 services.AddSingleton<IBlobStorageService, BlobStorageService>();
                 services.AddSingleton<IMessageTrackingService, MessageTrackingService>();
+                services.AddSingleton<IWhatsAppSendRateLimiter>(sp =>
+                {
+                    var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+                    var lim = settings.WhatsAppSendRateLimit;
+                    return new WhatsAppSendRateLimiter(
+                        highPriorityLessThan: lim?.HighPriorityLessThan ?? 10,
+                        maxSendsPerMinute: lim?.MaxSendsPerMinute ?? 20,
+                        enabled: lim?.Enabled ?? true);
+                });
 
                 // Select the message processor based on the configured broker
                 var broker = context.Configuration["MessageBroker"] ?? "Redis";

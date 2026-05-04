@@ -39,6 +39,34 @@ processor wraps `SendMessageAsync` in a process-local `SemaphoreSlim(1,1)`.
 **Result:** fetch/decode/ack logic can run in parallel, but actual WhatsApp
 sends are one-at-a-time per process.
 
+### WhatsApp send rate limit (low priority)
+
+Immediately before `SendMessageAsync`, both processors await
+`IWhatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority)` **inside** the
+send semaphore. Topics/streams with `Priority >= WhatsAppSendRateLimit:HighPriorityLessThan`
+(default **10**) are throttled to **`MaxSendsPerMinute`** successful sends per
+rolling minute (default **20**). Lower numeric priorities (e.g. `0` for auth)
+bypass the wait. After a **successful** throttled send, the limiter records a
+timestamp for the sliding window.
+
+```mermaid
+sequenceDiagram
+    participant P as Processor
+    participant L as WhatsAppSendRateLimiter
+    participant W as WhatsAppService
+    P->>L: WaitForSendSlotAsync(priority)
+    alt priority is high
+        L-->>P: return immediately
+    else priority is low
+        L-->>P: block until window has capacity
+    end
+    P->>W: SendMessageAsync
+    W-->>P: result
+    opt success and throttled
+        P->>L: NotifySuccessfulSendIfThrottled
+    end
+```
+
 ---
 
 ## 3) Service Bus flow
@@ -87,7 +115,9 @@ Each message is validated, sent (serialized Selenium access), then:
 The worker reports delivery callbacks using:
 
 - header `X-Notification-Secret`
-- body `message_id`, `status`, and optional `error_message` / `delivered_at`
+- snake_case JSON: `message_id` (backend UUID when present in payload), `status`,
+  optional `provider_message_id`, `delivered_at` (UTC `yyyy-MM-dd HH:mm:ss` for **Sent** — MySQL-friendly), and required
+  `error_message` for **Failed**
 
 At runtime it now emits only backend-supported statuses:
 

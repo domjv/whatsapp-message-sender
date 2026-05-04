@@ -16,7 +16,25 @@ public class AppSettings
     /// </summary>
     public BlobStorageSettings? BlobStorage { get; set; }
     public WhatsAppSettings WhatsApp { get; set; } = null!;
+    /// <summary>
+    /// Optional. When null, defaults apply: priorities &lt; 10 are unlimited, others capped at 20/minute.
+    /// </summary>
+    public WhatsAppSendRateLimitSettings? WhatsAppSendRateLimit { get; set; }
     public MessageTrackingSettings MessageTracking { get; set; } = null!;
+}
+
+/// <summary>
+/// Caps successful WhatsApp sends per minute for lower-priority topics/streams.
+/// </summary>
+public class WhatsAppSendRateLimitSettings
+{
+    public bool Enabled { get; set; } = true;
+    /// <summary>
+    /// Dispatch priorities strictly less than this value bypass the per-minute cap (treated as high priority).
+    /// Default 10 → priorities 0–9 are immediate; 10+ share the sliding window cap.
+    /// </summary>
+    public int HighPriorityLessThan { get; set; } = 10;
+    public int MaxSendsPerMinute { get; set; } = 20;
 }
 
 // ---------------------------------------------------------------------------
@@ -37,6 +55,10 @@ public class StreamConfig
 {
     public string StreamName { get; set; } = null!;
     public string ContainerName { get; set; } = null!;
+    /// <summary>
+    /// Same semantics as Service Bus topic <see cref="TopicSubscriptionConfig.Priority"/>; used for send throttling.
+    /// </summary>
+    public int Priority { get; set; } = 100;
 }
 
 // ---------------------------------------------------------------------------
