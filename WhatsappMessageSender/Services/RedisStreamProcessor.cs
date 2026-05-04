@@ -119,6 +119,9 @@ public class RedisStreamProcessor : IMessageProcessor
 
             Console.WriteLine($"Started processing stream: {streamName}");
         }
+
+        Console.WriteLine(
+            "Redis consumer is running. You may see no further output until stream entries arrive — press Ctrl+C to stop.");
     }
 
     public async Task CloseAsync()
@@ -246,10 +249,11 @@ public class RedisStreamProcessor : IMessageProcessor
                         continue;
                     }
 
+                    var entry = reclaimedEntry.Value;
                     Console.WriteLine(
-                        $"Reclaimed pending message {reclaimedEntry.Id} from stream '{streamName}'.");
+                        $"Reclaimed pending message {entry.Id} from stream '{streamName}'.");
                     await ProcessEntryWithConcurrencyLimitAsync(
-                        streamName, group, reclaimedEntry.Value, token);
+                        streamName, group, entry, token);
                 }
             }
             catch (OperationCanceledException)
@@ -365,9 +369,6 @@ public class RedisStreamProcessor : IMessageProcessor
 
         try
         {
-            await _messageTrackingService.TrackMessageStatusAsync(
-                messageProperties.MessageName, "Processing");
-
             if (!messageProperties.MessageType.Equals("whatsapp", StringComparison.OrdinalIgnoreCase))
             {
                 Console.WriteLine($"Message {messageId} has unsupported type '{messageProperties.MessageType}'. Moving to dead letter.");
@@ -408,7 +409,7 @@ public class RedisStreamProcessor : IMessageProcessor
             if (sendResult.Success)
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Delivered");
+                    messageProperties.MessageName, "Sent");
                 await _db!.StreamAcknowledgeAsync(streamName, group, entry.Id);
                 Console.WriteLine($"Message {messageId} sent successfully and acknowledged.");
             }
@@ -417,7 +418,7 @@ public class RedisStreamProcessor : IMessageProcessor
                 await ScheduleRetryAsync(streamName, group, entry, retryCount, sendResult.Error);
                 var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    messageProperties.MessageName, "Retry Scheduled",
+                    messageProperties.MessageName, "Pending",
                     $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}");
             }
         }
@@ -427,7 +428,7 @@ public class RedisStreamProcessor : IMessageProcessor
             await ScheduleRetryAsync(streamName, group, entry, retryCount, ex.Message);
             var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
             await _messageTrackingService.TrackMessageStatusAsync(
-                messageName, "Retry Scheduled",
+                messageName, "Pending",
                 $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}");
         }
     }
@@ -533,6 +534,7 @@ public class RedisStreamProcessor : IMessageProcessor
             var name = (string?)entry["name"];
             var attachmentUrl = (string?)entry["attachment_url"];
             var msgName = (string?)entry["message_name"];
+            var messageId = (string?)entry["message_id"];
 
             if (!string.IsNullOrEmpty(phone) && !string.IsNullOrEmpty(message))
             {
@@ -542,13 +544,18 @@ public class RedisStreamProcessor : IMessageProcessor
                     Message = message,
                     Name = name ?? msgName ?? "unknown",
                     AttachmentUrl = attachmentUrl,
+                    MessageId = messageId,
                     MessageName = msgName
                 };
             }
         }
 
         var messageType = (string?)entry["message_type"] ?? "whatsapp";
-        var messageName = (string?)entry["message_name"] ?? msg?.MessageName ?? string.Empty;
+        var messageName = (string?)entry["message_id"]
+            ?? msg?.MessageId
+            ?? (string?)entry["message_name"]
+            ?? msg?.MessageName
+            ?? string.Empty;
         var channelName = (string?)entry["stream_name"] ?? defaultChannelName;
 
         int.TryParse((string?)entry["retry_count"], out var retryCount);
@@ -576,6 +583,31 @@ public class RedisStreamProcessor : IMessageProcessor
 
             var messageId = messageParts[0].ToString();
             var rawFields = (RedisResult[])messageParts[1]!;
+            return TryParseClaimedFieldArray(messageId, rawFields, out streamEntry);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Parses XAUTOCLAIM-style field list (alternating key/value <see cref="RedisResult"/>s)
+    /// into a <see cref="StreamEntry"/>.
+    /// </summary>
+    internal static bool TryParseClaimedFieldArray(
+        string messageId,
+        RedisResult[] rawFields,
+        out StreamEntry? streamEntry)
+    {
+        streamEntry = null;
+        try
+        {
+            if (string.IsNullOrEmpty(messageId) || rawFields.Length == 0)
+            {
+                return false;
+            }
+
             var fields = new List<NameValueEntry>(rawFields.Length / 2);
 
             for (var i = 0; i + 1 < rawFields.Length; i += 2)

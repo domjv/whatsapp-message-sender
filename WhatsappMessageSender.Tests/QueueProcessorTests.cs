@@ -21,6 +21,7 @@ public class QueueProcessorTests
     // -------------------------------------------------------------------------
 
     private const string QueueName = "sbq-test";
+    private const string SubscriptionName = "whatsapp-message-sender-tests";
     private const string ContainerName = "test-container";
 
     private readonly Mock<IWhatsAppService> _whatsAppMock = new();
@@ -45,13 +46,15 @@ public class QueueProcessorTests
             ["MessageBroker"]                              = "ServiceBus",
             ["ServiceBus:ConnectionString"]                = "Endpoint=sb://test.servicebus.windows.net/;SharedAccessKeyName=test;SharedAccessKey=dGVzdA==",
             ["ServiceBus:MaxConcurrentCalls"]              = "2",
-            ["ServiceBus:Queues:0:QueueName"]              = QueueName,
-            ["ServiceBus:Queues:0:ContainerName"]          = ContainerName,
+            ["ServiceBus:Topics:0:TopicName"]              = QueueName,
+            ["ServiceBus:Topics:0:SubscriptionName"]       = SubscriptionName,
+            ["ServiceBus:Topics:0:ContainerName"]          = ContainerName,
+            ["ServiceBus:Topics:0:Priority"]               = "100",
             ["BlobStorage:ConnectionString"]               = "UseDevelopmentStorage=true",
             ["WhatsApp:ProfilePath"]                       = "/tmp",
             ["WhatsApp:ChromeDriverPath"]                  = "/tmp",
             ["MessageTracking:ApiUrl"]                     = "http://localhost",
-            ["MessageTracking:AuthToken"]                  = "token"
+            ["MessageTracking:NotificationSecret"]         = "secret"
         };
         return new ConfigurationBuilder()
             .AddInMemoryCollection(dict)
@@ -109,8 +112,7 @@ public class QueueProcessorTests
         Assert.True(_completed);
         Assert.Null(_deadLetterReason);
         Assert.Null(_abandonedProps);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-001", "Processing", null), Times.Once);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-001", "Delivered", null), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-001", "Sent", null), Times.Once);
     }
 
     // -------------------------------------------------------------------------
@@ -276,7 +278,7 @@ public class QueueProcessorTests
         Assert.False(_completed);
         Assert.Null(_deadLetterReason);
         Assert.NotNull(_abandonedProps);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-FAIL-001", "Retry Pending", It.IsAny<string>()), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-FAIL-001", "Pending", It.IsAny<string>()), Times.Once);
     }
 
     [Fact]
@@ -337,7 +339,7 @@ public class QueueProcessorTests
         // Assert
         Assert.False(_completed);
         Assert.NotNull(_abandonedProps);
-        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-EX-001", "Retry Pending", It.Is<string>(s => s!.Contains("Chrome crashed"))), Times.Once);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync("MSG-EX-001", "Pending", It.Is<string>(s => s!.Contains("Chrome crashed"))), Times.Once);
     }
 
     // -------------------------------------------------------------------------

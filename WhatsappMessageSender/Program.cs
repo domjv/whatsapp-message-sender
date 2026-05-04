@@ -22,13 +22,13 @@ class Program
                         if (settings.MessageTracking == null)
                             return false;
 
-                        if (string.IsNullOrWhiteSpace(settings.MessageTracking.AuthToken))
+                        if (string.IsNullOrWhiteSpace(settings.MessageTracking.NotificationSecret))
                             return false;
 
                         return Uri.TryCreate(
                             settings.MessageTracking.ApiUrl, UriKind.Absolute, out _);
                     },
-                    "MessageTracking must include a valid ApiUrl and AuthToken.")
+                    "MessageTracking must include a valid ApiUrl and NotificationSecret.")
                     .ValidateOnStart();
                 services.AddSingleton<IWhatsAppService, WhatsAppService>();
                 services.AddSingleton<IBlobStorageService, BlobStorageService>();

@@ -81,16 +81,28 @@ Each message is validated, sent (serialized Selenium access), then:
 `MessageTrackingService` now fails fast on bad configuration:
 
 - missing `MessageTracking` section
-- empty `AuthToken`
+- empty `NotificationSecret`
 - invalid/non-absolute `ApiUrl`
 
-At runtime it tracks status transitions such as:
+The worker reports delivery callbacks using:
 
-- `Processing`
-- `Delivered`
-- `Retry Pending` (Service Bus path)
-- `Retry Scheduled` (Redis path)
-- `Failed`
+- header `X-Notification-Secret`
+- body `message_id`, `status`, and optional `error_message` / `delivered_at`
+
+At runtime it now emits only backend-supported statuses:
+
+- `Pending` (accepted or queued for retry)
+- `Sent` (success)
+- `Failed` (terminal failure, dead-letter, or invalid payload)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Published
+    Published --> Pending: subscriber accepted / retry scheduled
+    Published --> Sent: WhatsApp send success
+    Published --> Failed: max retries or fatal validation error
+    Failed --> Sent: late provider success
+```
 
 ---
 

@@ -28,7 +28,7 @@ public class MessageTrackingServiceTests
             MessageTracking = new MessageTrackingSettings
             {
                 ApiUrl = "not-a-url",
-                AuthToken = "token-123"
+                NotificationSecret = "secret-123"
             },
             BlobStorage = new BlobStorageSettings { ConnectionString = "UseDevelopmentStorage=true" },
             WhatsApp = new WhatsAppSettings { ProfilePath = "/tmp", ChromeDriverPath = "/tmp" }

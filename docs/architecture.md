@@ -116,10 +116,15 @@ Redis Stream  ──── XREADGROUP ──▶  RedisStreamProcessor
 
 ## Azure Service Bus delivery model
 
-The `QueueProcessor` uses Service Bus native features:
+The `QueueProcessor` uses Service Bus topic subscriptions plus an in-memory
+priority dispatcher:
 
 - **Lock-based at-least-once delivery** — messages remain locked until
   `CompleteAsync` (success) or `AbandonAsync` (retry).
+- **Cross-topic priority** — messages from all configured subscriptions are
+  enqueued to a shared priority queue; auth topics are processed first.
+- **Single-send guarantee** — even with multiple subscriptions and concurrent
+  callbacks, only one WhatsApp send is executed at a time.
 - **Native retry** — `AbandonAsync` returns the message to the queue; the
   Service Bus visibility timeout governs the retry interval.
 - **Dead-letter** — after `MaxDeliveryCount` (configurable on the queue) or
@@ -177,7 +182,7 @@ automation.
   "MessageBroker": "Redis",
   "BlobStorage":   { "ConnectionString": "…" },
   "WhatsApp":      { "ProfilePath": "…", "ChromeDriverPath": "…" },
-  "MessageTracking": { "ApiUrl": "…", "AuthToken": "…" }
+  "MessageTracking": { "ApiUrl": "…", "NotificationSecret": "…" }
 }
 ```
 
@@ -201,12 +206,29 @@ automation.
 ```json
 "ServiceBus": {
   "ConnectionString": "Endpoint=sb://…",
-  "MaxConcurrentCalls": 2,
-  "Queues": [
-    { "QueueName": "sbq-pleasntbiz", "ContainerName": "pleasantbiz-attachments" }
+  "MaxConcurrentCalls": 4,
+  "MaxAutoRenewDurationMinutes": 10,
+  "Topics": [
+    {
+      "TopicName": "hm-auth-notifications",
+      "SubscriptionName": "whatsapp-message-sender",
+      "ContainerName": "pleasantbiz-attachments",
+      "Priority": 0
+    }
   ]
 }
 ```
+
+### Delivery status callback contract
+
+`MessageTrackingService` posts status updates to backend endpoint 1:
+
+- header: `X-Notification-Secret: <MessageTracking.NotificationSecret>`
+- body:
+  - `message_id`
+  - `status` (`Sent`, `Failed`, `Pending`)
+  - `error_message` (when failed)
+  - `delivered_at` (when sent)
 
 ---
 

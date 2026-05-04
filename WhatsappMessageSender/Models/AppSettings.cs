@@ -10,7 +10,11 @@ public class AppSettings
 
     public RedisSettings? Redis { get; set; }
     public ServiceBusSettings? ServiceBus { get; set; }
-    public BlobStorageSettings BlobStorage { get; set; } = null!;
+    /// <summary>
+    /// Optional. When null or <see cref="BlobStorageSettings.ConnectionString"/> is empty/invalid,
+    /// attachment downloads are skipped (messages without attachments still work).
+    /// </summary>
+    public BlobStorageSettings? BlobStorage { get; set; }
     public WhatsAppSettings WhatsApp { get; set; } = null!;
     public MessageTrackingSettings MessageTracking { get; set; } = null!;
 }
@@ -42,14 +46,25 @@ public class StreamConfig
 public class ServiceBusSettings
 {
     public string ConnectionString { get; set; } = null!;
-    public List<QueueConfig> Queues { get; set; } = null!;
-    public int MaxConcurrentCalls { get; set; } = 2;
+    public List<TopicSubscriptionConfig> Topics { get; set; } = [];
+    public int MaxConcurrentCalls { get; set; } = 4;
+    public int MaxAutoRenewDurationMinutes { get; set; } = 10;
 }
 
-public class QueueConfig
+public class TopicSubscriptionConfig
 {
-    public string QueueName { get; set; } = null!;
+    public string TopicName { get; set; } = null!;
+    public string SubscriptionName { get; set; } = null!;
     public string ContainerName { get; set; } = null!;
+    /// <summary>
+    /// When true, uses <c>RegisterSessionHandler</c> because the Azure subscription has sessions enabled.
+    /// When false, uses <c>RegisterMessageHandler</c> for a non-session subscription.
+    /// </summary>
+    public bool RequiresSession { get; set; }
+    /// <summary>
+    /// Lower values are processed first. Use 0 for highest priority topics.
+    /// </summary>
+    public int Priority { get; set; } = 100;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,5 +85,5 @@ public class WhatsAppSettings
 public class MessageTrackingSettings
 {
     public string ApiUrl { get; set; } = null!;
-    public string AuthToken { get; set; } = null!;
+    public string NotificationSecret { get; set; } = null!;
 }
