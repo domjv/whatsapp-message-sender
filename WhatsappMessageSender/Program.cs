@@ -1,9 +1,9 @@
 ﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using WhatsappMessageSender.Models;
 using WhatsappMessageSender.Services;
-using Microsoft.Extensions.Options;
 
 namespace WhatsappMessageSender;
 
@@ -14,24 +14,48 @@ class Program
         var host = Host.CreateDefaultBuilder(args)
             .ConfigureServices((context, services) =>
             {
-                services.Configure<AppSettings>(context.Configuration);
-                services.AddSingleton<WhatsAppService>();
-                services.AddSingleton<BlobStorageService>();
-                services.AddSingleton<MessageTrackingService>();
-                services.AddSingleton<QueueProcessor>();
+                // Validate critical settings during startup so the service fails
+                // fast with a clear message instead of crashing after startup.
+                services.AddOptions<AppSettings>()
+                    .Bind(context.Configuration)
+                    .Validate(settings =>
+                    {
+                        if (settings.MessageTracking == null)
+                            return false;
+
+                        if (string.IsNullOrWhiteSpace(settings.MessageTracking.NotificationSecret))
+                            return false;
+
+                        return Uri.TryCreate(
+                            settings.MessageTracking.ApiUrl, UriKind.Absolute, out _);
+                    },
+                    "MessageTracking must include a valid ApiUrl and NotificationSecret.")
+                    .ValidateOnStart();
+                services.AddSingleton<IWhatsAppService, WhatsAppService>();
+                services.AddSingleton<IBlobStorageService, BlobStorageService>();
+                services.AddSingleton<IMessageTrackingService, MessageTrackingService>();
+                services.AddSingleton<IWhatsAppSendRateLimiter>(sp =>
+                {
+                    var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+                    var lim = settings.WhatsAppSendRateLimit;
+                    return new WhatsAppSendRateLimiter(
+                        highPriorityLessThan: lim?.HighPriorityLessThan ?? 10,
+                        maxSendsPerMinute: lim?.MaxSendsPerMinute ?? 20,
+                        enabled: lim?.Enabled ?? true);
+                });
+
+                // Select the message processor based on the configured broker
+                var broker = context.Configuration["MessageBroker"] ?? "Redis";
+                if (broker.Equals("ServiceBus", StringComparison.OrdinalIgnoreCase))
+                    services.AddSingleton<IMessageProcessor, QueueProcessor>();
+                else
+                    services.AddSingleton<IMessageProcessor, RedisStreamProcessor>();
+
+                // Bridge host lifetime to IMessageProcessor.Start/Close.
+                services.AddHostedService<ProcessorHostedService>();
             })
             .Build();
 
-        // Initialize MessageTrackingService
-        var appSettings = host.Services.GetRequiredService<IOptions<AppSettings>>();
-        MessageTrackingService.Initialize(appSettings);
-
-        var queueProcessor = host.Services.GetRequiredService<QueueProcessor>();
-        queueProcessor.StartProcessing();
-
-        Console.WriteLine("Press any key to exit");
-        Console.ReadKey();
-
-        await queueProcessor.CloseAsync();
+        await host.RunAsync();
     }
 }

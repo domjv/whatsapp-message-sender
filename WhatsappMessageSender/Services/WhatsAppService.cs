@@ -9,9 +9,11 @@ public class SendMessageResult
 {
     public bool Success { get; set; }
     public string? Error { get; set; }
+    /// <summary>Optional provider id (e.g. WhatsApp <c>wamid.*</c>) when available.</summary>
+    public string? ProviderMessageId { get; set; }
 }
 
-public class WhatsAppService : IDisposable
+public class WhatsAppService : IWhatsAppService, IDisposable
 {
     private readonly ChromeDriver _driver;
     private readonly string _profilePath;
@@ -19,7 +21,7 @@ public class WhatsAppService : IDisposable
     public WhatsAppService(IConfiguration configuration)
     {
         _profilePath = GetPlatformSpecificProfilePath(configuration["WhatsApp:ProfilePath"] ?? throw new InvalidOperationException());
-        _driver = InitializeDriver(configuration["WhatsApp:ChromeDriverPath"] ?? throw new InvalidOperationException());
+        _driver = InitializeDriver(configuration["WhatsApp:ChromeDriverPath"] ?? "");
         InitializeWhatsAppWeb();
     }
 
@@ -39,6 +41,35 @@ public class WhatsAppService : IDisposable
 
     private ChromeDriver InitializeDriver(string driverPath)
     {
+        var options = BuildChromeOptions();
+        var trimmed = driverPath.Trim();
+
+        // Selenium Manager (built into Selenium 4.6+) downloads a ChromeDriver that matches the
+        // installed Chrome. Prefer this when no fixed path is set — avoids Homebrew driver
+        // ahead of Chrome (e.g. driver 148 vs Chrome 147).
+        if (string.IsNullOrEmpty(trimmed) ||
+            trimmed.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine(
+                "WhatsApp:ChromeDriverPath empty or 'auto' — using Selenium Manager (driver matched to installed Chrome).");
+            return new ChromeDriver(options);
+        }
+
+        try
+        {
+            var service = CreateChromeDriverService(trimmed);
+            return new ChromeDriver(service, options);
+        }
+        catch (InvalidOperationException ex) when (IsChromeDriverVersionMismatch(ex))
+        {
+            Console.WriteLine(
+                "Configured ChromeDriver does not match installed Google Chrome. Retrying with Selenium Manager.");
+            return new ChromeDriver(options);
+        }
+    }
+
+    private ChromeOptions BuildChromeOptions()
+    {
         var options = new ChromeOptions();
         options.AddArgument("--start-maximized");
         options.AddArgument("--disable-notifications");
@@ -46,114 +77,148 @@ public class WhatsAppService : IDisposable
         options.AddArgument("--disable-gpu");
         options.AddArgument("--disable-dev-shm-usage");
         options.AddArgument("--no-sandbox");
-        
-        // Add preferences to prevent download dialog
+
         var downloadPath = Path.Combine(Path.GetTempPath(), "WhatsAppDownloads");
         Directory.CreateDirectory(downloadPath);
-        
+
         options.AddUserProfilePreference("download.default_directory", downloadPath);
         options.AddUserProfilePreference("download.prompt_for_download", false);
         options.AddUserProfilePreference("download.directory_upgrade", true);
         options.AddUserProfilePreference("safebrowsing.enabled", true);
+        return options;
+    }
 
-        if (string.IsNullOrEmpty(driverPath))
+    private static bool IsChromeDriverVersionMismatch(InvalidOperationException ex)
+    {
+        var m = ex.Message;
+        return m.Contains("session not created", StringComparison.OrdinalIgnoreCase)
+            && (m.Contains("only supports Chrome version", StringComparison.OrdinalIgnoreCase)
+                || m.Contains("This version of ChromeDriver only supports", StringComparison.OrdinalIgnoreCase)
+                || m.Contains("Current browser version is", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static ChromeDriverService CreateChromeDriverService(string driverPath)
+    {
+        if (File.Exists(driverPath))
         {
-            driverPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
-                Environment.OSVersion.Platform == PlatformID.Unix ? "chromedriver-mac" : "chromedriver-win64");
+            var dir = Path.GetDirectoryName(Path.GetFullPath(driverPath));
+            var fileName = Path.GetFileName(driverPath);
+            if (string.IsNullOrEmpty(dir))
+            {
+                dir = ".";
+            }
+
+            return ChromeDriverService.CreateDefaultService(dir, fileName);
         }
 
-        return new ChromeDriver(driverPath, options);
+        if (Directory.Exists(driverPath))
+        {
+            return ChromeDriverService.CreateDefaultService(driverPath);
+        }
+
+        var bundledDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+            Environment.OSVersion.Platform == PlatformID.Unix ? "chromedriver-mac" : "chromedriver-win64");
+        if (Directory.Exists(bundledDir))
+        {
+            Console.WriteLine(
+                $"WhatsApp:ChromeDriverPath '{driverPath}' not found; using bundled driver folder: {bundledDir}");
+            return ChromeDriverService.CreateDefaultService(bundledDir);
+        }
+
+        Console.WriteLine(
+            $"WhatsApp:ChromeDriverPath '{driverPath}' not found; using Selenium Manager / PATH (install chromedriver or run from a machine with Chrome).");
+        return ChromeDriverService.CreateDefaultService();
     }
 
     private void InitializeWhatsAppWeb()
     {
         _driver.Navigate().GoToUrl("https://web.whatsapp.com/");
-        Console.WriteLine("Scan QR Code to log in to WhatsApp Web...");
+        Console.WriteLine("Scan QR Code to log in to WhatsApp Web (you have ~20 seconds before the app continues)…");
         Thread.Sleep(20000);
+        Console.WriteLine("WhatsApp Web startup pause finished — the worker will now connect to your message broker.");
     }
 
     public async Task<SendMessageResult> SendMessageAsync(string phoneNumber, string textMessage, string? filePath)
-{
-    try
     {
-        var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(30))
+        try
         {
-            PollingInterval = TimeSpan.FromMilliseconds(500)
-        };
-        wait.IgnoreExceptionTypes(typeof(StaleElementReferenceException), typeof(NoSuchElementException));
+            var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(30))
+            {
+                PollingInterval = TimeSpan.FromMilliseconds(500)
+            };
+            wait.IgnoreExceptionTypes(typeof(StaleElementReferenceException), typeof(NoSuchElementException));
 
-        var url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
-        await _driver.Navigate().GoToUrlAsync(url);
+            var url = $"https://web.whatsapp.com/send?phone={phoneNumber}&text={Uri.EscapeDataString(textMessage)}";
+            await _driver.Navigate().GoToUrlAsync(url);
 
-        var chatInputBox = wait.Until(d => {
-            var element = d.FindElement(By.XPath("//div[@contenteditable='true' and @aria-placeholder='Type a message']"));
-            return element is { Displayed: true, Enabled: true } ? element : null;
-        });
-
-        chatInputBox.Click();
-        chatInputBox.SendKeys(Keys.Enter);
-
-        wait.Until(d => {
-            try {
-                return d.FindElements(By.XPath("//span[@data-icon='msg-time']")).Count == 0;
-            }
-            catch {
-                return false;
-            }
-        });
-
-        if (!string.IsNullOrEmpty(filePath))
-        {
-            var attachButton = wait.Until(d => {
-                var element = d.FindElement(By.XPath("//button[@title='Attach']"));
+            var chatInputBox = wait.Until(d => {
+                var element = d.FindElement(By.XPath("//div[@contenteditable='true' and @aria-placeholder='Type a message']"));
                 return element is { Displayed: true, Enabled: true } ? element : null;
             });
-            attachButton.Click();
 
-            var documentOption = wait.Until(d => {
-                var element = d.FindElement(By.XPath("//span[text()='Document']"));
-                return element is { Displayed: true, Enabled: true } ? element : null;
-            });
-            documentOption.Click();
+            chatInputBox.Click();
+            chatInputBox.SendKeys(Keys.Enter);
 
-            var fileInput = wait.Until(d => d.FindElement(By.XPath("//input[@accept='*']")));
-            fileInput.SendKeys(filePath);
-
-            var sendFileButton = wait.Until(d => {
-                var element = d.FindElement(By.XPath("//div[@aria-label='Send']"));
-                if (!element.Displayed || !element.Enabled) return null;
-
-                var loadingElements = d.FindElements(By.XPath("//div[contains(@class, 'progress')]"));
-                return loadingElements.Count == 0 ? element : null;
-            });
-
-            sendFileButton.Click();
-
-            // Wait for file to be sent successfully
             wait.Until(d => {
                 try {
-                    var sentStatus = d.FindElements(By.XPath("//span[@data-icon='msg-check']"));
-                    return sentStatus.Count != 0;
+                    return d.FindElements(By.XPath("//span[@data-icon='msg-time']")).Count == 0;
                 }
                 catch {
                     return false;
                 }
             });
-        }
 
-        Console.WriteLine($"Message sent to {phoneNumber}");
-        return new SendMessageResult { Success = true };
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Error sending WhatsApp message: {ex.Message}");
-        return new SendMessageResult
+            if (!string.IsNullOrEmpty(filePath))
+            {
+                var attachButton = wait.Until(d => {
+                    var element = d.FindElement(By.XPath("//button[@title='Attach']"));
+                    return element is { Displayed: true, Enabled: true } ? element : null;
+                });
+                attachButton.Click();
+
+                var documentOption = wait.Until(d => {
+                    var element = d.FindElement(By.XPath("//span[text()='Document']"));
+                    return element is { Displayed: true, Enabled: true } ? element : null;
+                });
+                documentOption.Click();
+
+                var fileInput = wait.Until(d => d.FindElement(By.XPath("//input[@accept='*']")));
+                fileInput.SendKeys(filePath);
+
+                var sendFileButton = wait.Until(d => {
+                    var element = d.FindElement(By.XPath("//div[@aria-label='Send']"));
+                    if (!element.Displayed || !element.Enabled) return null;
+
+                    var loadingElements = d.FindElements(By.XPath("//div[contains(@class, 'progress')]"));
+                    return loadingElements.Count == 0 ? element : null;
+                });
+
+                sendFileButton.Click();
+
+                wait.Until(d => {
+                    try {
+                        var sentStatus = d.FindElements(By.XPath("//span[@data-icon='msg-check']"));
+                        return sentStatus.Count != 0;
+                    }
+                    catch {
+                        return false;
+                    }
+                });
+            }
+
+            Console.WriteLine($"Message sent to {phoneNumber}");
+            return new SendMessageResult { Success = true };
+        }
+        catch (Exception ex)
         {
-            Success = false,
-            Error = ex.Message
-        };
+            Console.WriteLine($"Error sending WhatsApp message: {ex.Message}");
+            return new SendMessageResult
+            {
+                Success = false,
+                Error = ex.Message
+            };
+        }
     }
-}
 
     public void Dispose()
     {
