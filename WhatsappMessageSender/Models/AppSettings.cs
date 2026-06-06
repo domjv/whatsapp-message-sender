@@ -71,6 +71,10 @@ public class ServiceBusSettings
     public List<TopicSubscriptionConfig> Topics { get; set; } = [];
     public int MaxConcurrentCalls { get; set; } = 4;
     public int MaxAutoRenewDurationMinutes { get; set; } = 10;
+    /// <summary>
+    /// Set true when AMQP TCP is unstable in your environment (proxy/firewall/NAT idle timeouts).
+    /// </summary>
+    public bool UseWebSocketsTransport { get; set; }
 }
 
 public class TopicSubscriptionConfig

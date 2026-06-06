@@ -1,26 +1,15 @@
-using WhatsappMessageSender.Models;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Core;
+using System.Collections.Concurrent;
+using System.Text;
+using Azure.Messaging.ServiceBus;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
-using System.Text;
-using System.Collections.Concurrent;
+using WhatsappMessageSender.Models;
 
 namespace WhatsappMessageSender.Services;
 
 /// <summary>
 /// Reads WhatsApp notification messages from Azure Service Bus topic subscriptions and
 /// processes them with at-least-once delivery (lock-based retry).
-///
-/// Flow:
-///   1. For each topic, either RegisterMessageHandler (non-session subscription) or
-///      RegisterSessionHandler (when <see cref="TopicSubscriptionConfig.RequiresSession"/> is true).
-///   2. Messages are queued to an in-memory priority dispatcher (auth first).
-///   2. On success  → CompleteAsync (removes message from the queue).
-///   3. On failure  → AbandonAsync  (Service Bus releases the lock so the
-///      message becomes visible again after the visibility timeout, up to
-///      the subscription's MaxDeliveryCount).
-///   4. MaxRetries exceeded → DeadLetterAsync.
 /// </summary>
 public class QueueProcessor : IMessageProcessor
 {
@@ -28,7 +17,6 @@ public class QueueProcessor : IMessageProcessor
     private readonly IWhatsAppService _whatsAppService;
     private readonly IBlobStorageService _blobStorageService;
     private readonly IMessageTrackingService _messageTrackingService;
-    private readonly ConcurrentDictionary<string, ISubscriptionClient> _subscriptionClients;
     private readonly Dictionary<string, string> _topicContainerMapping;
     private readonly Dictionary<string, int> _topicPriorityMapping;
     private readonly PriorityQueue<PendingMessage, (int Priority, long Sequence)> _pendingMessages = new();
@@ -37,9 +25,11 @@ public class QueueProcessor : IMessageProcessor
     private readonly CancellationTokenSource _cts = new();
     private Task? _dispatcherTask;
     private long _enqueueSequence;
+    private readonly ServiceBusClient _serviceBusClient;
+    private readonly ConcurrentDictionary<string, ServiceBusProcessor> _processors = new();
+    private readonly ConcurrentDictionary<string, ServiceBusSessionProcessor> _sessionProcessors = new();
 
     // Selenium/WhatsApp Web driver is single-session and not thread-safe.
-    // Serialize sends even when Service Bus dispatches callbacks concurrently.
     private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
     private readonly IWhatsAppSendRateLimiter _whatsAppSendRateLimiter;
 
@@ -61,21 +51,28 @@ public class QueueProcessor : IMessageProcessor
         _blobStorageService = blobStorageService;
         _messageTrackingService = messageTrackingService;
         _whatsAppSendRateLimiter = whatsAppSendRateLimiter;
-        _subscriptionClients = new ConcurrentDictionary<string, ISubscriptionClient>();
         _topicContainerMapping = _appSettings.ServiceBus.Topics
             .GroupBy(t => t.TopicName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().ContainerName, StringComparer.OrdinalIgnoreCase);
         _topicPriorityMapping = _appSettings.ServiceBus.Topics
             .GroupBy(t => t.TopicName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().Priority, StringComparer.OrdinalIgnoreCase);
+
+        var transport = _appSettings.ServiceBus.UseWebSocketsTransport
+            ? ServiceBusTransportType.AmqpWebSockets
+            : ServiceBusTransportType.AmqpTcp;
+        _serviceBusClient = new ServiceBusClient(
+            _appSettings.ServiceBus.ConnectionString,
+            new ServiceBusClientOptions { TransportType = transport });
     }
 
     public void StartProcessing()
     {
-        var connectionString = _appSettings.ServiceBus!.ConnectionString;
-        var maxConcurrent = _appSettings.ServiceBus.MaxConcurrentCalls;
+        var serviceBusSettings = _appSettings.ServiceBus
+            ?? throw new InvalidOperationException("ServiceBus configuration is missing.");
+        var maxConcurrent = serviceBusSettings.MaxConcurrentCalls;
         var maxAutoRenew = TimeSpan.FromMinutes(
-            Math.Max(1, _appSettings.ServiceBus.MaxAutoRenewDurationMinutes));
+            Math.Max(1, serviceBusSettings.MaxAutoRenewDurationMinutes));
 
         _dispatcherTask = Task.Run(() => DispatchMessagesLoopAsync(_cts.Token), _cts.Token);
         _ = _dispatcherTask.ContinueWith(
@@ -93,54 +90,50 @@ public class QueueProcessor : IMessageProcessor
             },
             TaskContinuationOptions.ExecuteSynchronously);
 
-        foreach (var topicConfig in _appSettings.ServiceBus.Topics)
+        foreach (var topicConfig in serviceBusSettings.Topics)
         {
-            var subscriptionClient = new SubscriptionClient(
-                connectionString,
-                topicConfig.TopicName,
-                topicConfig.SubscriptionName);
-            var clientKey = GetSubscriptionClientKey(topicConfig.TopicName, topicConfig.SubscriptionName);
-            _subscriptionClients.TryAdd(clientKey, subscriptionClient);
-            subscriptionClient.PrefetchCount = 0;
-
             if (topicConfig.RequiresSession)
             {
-                var sessionHandlerOptions = new SessionHandlerOptions(ExceptionReceivedHandler)
-                {
-                    MaxConcurrentSessions = maxConcurrent,
-                    MessageWaitTimeout = TimeSpan.FromMinutes(1),
-                    MaxAutoRenewDuration = maxAutoRenew,
-                    AutoComplete = false
-                };
+                var sessionProcessor = _serviceBusClient.CreateSessionProcessor(
+                    topicConfig.TopicName,
+                    topicConfig.SubscriptionName,
+                    new ServiceBusSessionProcessorOptions
+                    {
+                        AutoCompleteMessages = false,
+                        MaxConcurrentSessions = maxConcurrent,
+                        MaxAutoLockRenewalDuration = maxAutoRenew
+                    });
 
-                subscriptionClient.RegisterSessionHandler(
-                    (session, message, token) =>
-                        ProcessMessagesAsync(session, message, token, topicConfig.TopicName, topicConfig.SubscriptionName),
-                    sessionHandlerOptions);
+                sessionProcessor.ProcessErrorAsync += ExceptionReceivedHandler;
+                sessionProcessor.ProcessMessageAsync += args => ProcessSessionMessageAsync(args, topicConfig.TopicName);
+                _sessionProcessors.TryAdd(GetSubscriptionClientKey(topicConfig.TopicName, topicConfig.SubscriptionName), sessionProcessor);
+                _ = sessionProcessor.StartProcessingAsync(_cts.Token);
 
                 Console.WriteLine(
                     $"Started processing topic/subscription (sessions): {topicConfig.TopicName}/{topicConfig.SubscriptionName}");
             }
             else
             {
-                var messageHandlerOptions = new MessageHandlerOptions(ExceptionReceivedHandler)
-                {
-                    MaxConcurrentCalls = maxConcurrent,
-                    MaxAutoRenewDuration = maxAutoRenew,
-                    AutoComplete = false
-                };
-
-                subscriptionClient.RegisterMessageHandler(
-                    (message, token) =>
-                        ProcessMessagesAsync(subscriptionClient, message, token, topicConfig.TopicName, topicConfig.SubscriptionName),
-                    messageHandlerOptions);
+                var processor = _serviceBusClient.CreateProcessor(
+                    topicConfig.TopicName,
+                    topicConfig.SubscriptionName,
+                    new ServiceBusProcessorOptions
+                    {
+                        AutoCompleteMessages = false,
+                        MaxConcurrentCalls = maxConcurrent,
+                        MaxAutoLockRenewalDuration = maxAutoRenew
+                    });
+                processor.ProcessErrorAsync += ExceptionReceivedHandler;
+                processor.ProcessMessageAsync += args => ProcessNonSessionMessageAsync(args, topicConfig.TopicName);
+                _processors.TryAdd(GetSubscriptionClientKey(topicConfig.TopicName, topicConfig.SubscriptionName), processor);
+                _ = processor.StartProcessingAsync(_cts.Token);
 
                 Console.WriteLine(
                     $"Started processing topic/subscription: {topicConfig.TopicName}/{topicConfig.SubscriptionName}");
             }
         }
 
-        if (_appSettings.ServiceBus.Topics.Count == 0)
+        if (serviceBusSettings.Topics.Count == 0)
         {
             Console.WriteLine("Warning: ServiceBus:Topics is empty — no subscriptions will receive messages.");
         }
@@ -154,16 +147,25 @@ public class QueueProcessor : IMessageProcessor
         if (_dispatcherTask != null)
         {
             try
-            {
+                {
                 await _dispatcherTask;
             }
             catch (OperationCanceledException) { }
         }
 
-        foreach (var subscriptionClient in _subscriptionClients.Values)
+        foreach (var processor in _processors.Values)
         {
-            await subscriptionClient.CloseAsync();
+            await processor.StopProcessingAsync();
+            await processor.DisposeAsync();
         }
+
+        foreach (var sessionProcessor in _sessionProcessors.Values)
+        {
+            await sessionProcessor.StopProcessingAsync();
+            await sessionProcessor.DisposeAsync();
+        }
+
+        await _serviceBusClient.DisposeAsync();
     }
 
     public void Dispose()
@@ -173,32 +175,13 @@ public class QueueProcessor : IMessageProcessor
         _pendingSignal.Dispose();
         _cts.Dispose();
         _whatsAppSendSemaphore.Dispose();
-
-        foreach (var subscriptionClient in _subscriptionClients.Values)
-        {
-            subscriptionClient.CloseAsync().Wait();
-        }
+        _serviceBusClient.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
-    // -------------------------------------------------------------------------
-    // ServiceBus callback — extracts data then delegates to the core method
-    // -------------------------------------------------------------------------
-
-    private async Task ProcessMessagesAsync(
-        IReceiverClient receiverClient,
-        Message message,
-        CancellationToken token,
-        string configuredTopicName,
-        string subscriptionName)
+    private Task ProcessNonSessionMessageAsync(ProcessMessageEventArgs args, string configuredTopicName)
     {
-        var clientKey = GetSubscriptionClientKey(configuredTopicName, subscriptionName);
-        if (!_subscriptionClients.TryGetValue(clientKey, out _))
-        {
-            Console.WriteLine($"No subscription client found for: {configuredTopicName}/{subscriptionName}");
-            return;
-        }
-
-        var resolvedTopicName = message.UserProperties.TryGetValue("TopicName", out var topicNameObj)
+        var message = args.Message;
+        var resolvedTopicName = message.ApplicationProperties.TryGetValue("TopicName", out var topicNameObj)
             ? topicNameObj?.ToString() ?? configuredTopicName
             : configuredTopicName;
 
@@ -206,7 +189,10 @@ public class QueueProcessor : IMessageProcessor
         var pendingMessage = new PendingMessage(
             resolvedTopicName,
             message,
-            receiverClient,
+            DeliveryCount: message.DeliveryCount,
+            CompleteAsync: () => args.CompleteMessageAsync(message),
+            DeadLetterAsync: (reason, desc) => args.DeadLetterMessageAsync(message, reason, desc),
+            AbandonAsync: props => args.AbandonMessageAsync(message, props),
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
 
         lock (_pendingLock)
@@ -217,10 +203,35 @@ public class QueueProcessor : IMessageProcessor
         }
 
         _pendingSignal.Release();
+        return pendingMessage.Completion.Task;
+    }
 
-        using var registration = token.Register(
-            () => pendingMessage.Completion.TrySetCanceled(token));
-        await pendingMessage.Completion.Task;
+    private Task ProcessSessionMessageAsync(ProcessSessionMessageEventArgs args, string configuredTopicName)
+    {
+        var message = args.Message;
+        var resolvedTopicName = message.ApplicationProperties.TryGetValue("TopicName", out var topicNameObj)
+            ? topicNameObj?.ToString() ?? configuredTopicName
+            : configuredTopicName;
+
+        var priority = ResolvePriority(resolvedTopicName);
+        var pendingMessage = new PendingMessage(
+            resolvedTopicName,
+            message,
+            DeliveryCount: message.DeliveryCount,
+            CompleteAsync: () => args.CompleteMessageAsync(message),
+            DeadLetterAsync: (reason, desc) => args.DeadLetterMessageAsync(message, reason, desc),
+            AbandonAsync: props => args.AbandonMessageAsync(message, props),
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+
+        lock (_pendingLock)
+        {
+            _pendingMessages.Enqueue(
+                pendingMessage,
+                (priority, Interlocked.Increment(ref _enqueueSequence)));
+        }
+
+        _pendingSignal.Release();
+        return pendingMessage.Completion.Task;
     }
 
     private async Task DispatchMessagesLoopAsync(CancellationToken token)
@@ -266,14 +277,12 @@ public class QueueProcessor : IMessageProcessor
     {
         var message = pending.Message;
         var messageId = message.MessageId;
-        var messageBody = Encoding.UTF8.GetString(message.Body);
-        var deliveryCount = message.SystemProperties.DeliveryCount;
-
-        var messageType = message.UserProperties.TryGetValue("MessageType", out var messageTypeObj)
+        var messageBody = Encoding.UTF8.GetString(message.Body.ToArray());
+        var deliveryCount = pending.DeliveryCount;
+        var messageType = message.ApplicationProperties.TryGetValue("MessageType", out var messageTypeObj)
             ? messageTypeObj?.ToString() ?? "whatsapp"
             : "whatsapp";
-
-        var messageName = message.UserProperties.TryGetValue("MessageName", out var messageNameObj)
+        var messageName = message.ApplicationProperties.TryGetValue("MessageName", out var messageNameObj)
             ? messageNameObj?.ToString()
             : null;
 
@@ -286,9 +295,9 @@ public class QueueProcessor : IMessageProcessor
             queueName: pending.TopicName,
             messageType: messageType,
             messageName: messageName,
-            completeAsync: () => SafeCompleteAsync(pending.ReceiverClient, message),
-            deadLetterAsync: (reason, desc) => SafeDeadLetterAsync(pending.ReceiverClient, message, reason, desc),
-            abandonAsync: (props) => SafeAbandonAsync(pending.ReceiverClient, message, props),
+            completeAsync: pending.CompleteAsync,
+            deadLetterAsync: pending.DeadLetterAsync,
+            abandonAsync: pending.AbandonAsync,
             dispatchPriority: dispatchPriority,
             cancellationToken: _cts.Token);
     }
@@ -451,66 +460,20 @@ public class QueueProcessor : IMessageProcessor
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Safe ServiceBus operation wrappers
-    // -------------------------------------------------------------------------
-
-    private static async Task SafeCompleteAsync(IReceiverClient receiverClient, Message message)
+    private static Task ExceptionReceivedHandler(ProcessErrorEventArgs args)
     {
-        try
+        if (args.Exception is ServiceBusException sbEx &&
+            (sbEx.IsTransient ||
+             sbEx.Message.Contains("operation was canceled", StringComparison.OrdinalIgnoreCase) ||
+             sbEx.Message.Contains("connection was inactive", StringComparison.OrdinalIgnoreCase)))
         {
-            await receiverClient.CompleteAsync(message.SystemProperties.LockToken);
-            Console.WriteLine("Message Acknowledged");
+            Console.WriteLine(
+                $"Service Bus transient issue ({args.ErrorSource}): {sbEx.Message}");
+            return Task.CompletedTask;
         }
-        catch (MessageLockLostException ex)
-        {
-            Console.WriteLine($"Message lock lost while completing: {ex.Message}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error completing message: {ex.Message}");
-        }
-    }
 
-    private static async Task SafeDeadLetterAsync(
-        IReceiverClient receiverClient, Message message, string reason, string description)
-    {
-        try
-        {
-            await receiverClient.DeadLetterAsync(message.SystemProperties.LockToken, reason, description);
-            Console.WriteLine($"Message dead-lettered: {reason}");
-        }
-        catch (MessageLockLostException ex)
-        {
-            Console.WriteLine($"Message lock lost while dead-lettering: {ex.Message}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error dead-lettering message: {ex.Message}");
-        }
-    }
-
-    private static async Task SafeAbandonAsync(
-        IReceiverClient receiverClient, Message message, IDictionary<string, object> props)
-    {
-        try
-        {
-            await receiverClient.AbandonAsync(message.SystemProperties.LockToken, props);
-            Console.WriteLine("Message Abandoned");
-        }
-        catch (MessageLockLostException ex)
-        {
-            Console.WriteLine($"Message lock lost while abandoning: {ex.Message}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error abandoning message: {ex.Message}");
-        }
-    }
-
-    private static Task ExceptionReceivedHandler(ExceptionReceivedEventArgs args)
-    {
-        Console.WriteLine($"Message handler encountered an exception: {args.Exception}");
+        Console.WriteLine(
+            $"Service Bus processor error ({args.ErrorSource}) entity '{args.EntityPath}': {args.Exception}");
         return Task.CompletedTask;
     }
 
@@ -645,8 +608,11 @@ public class QueueProcessor : IMessageProcessor
 
     private sealed record PendingMessage(
         string TopicName,
-        Message Message,
-        IReceiverClient ReceiverClient,
+        ServiceBusReceivedMessage Message,
+        int DeliveryCount,
+        Func<Task> CompleteAsync,
+        Func<string, string, Task> DeadLetterAsync,
+        Func<IDictionary<string, object>, Task> AbandonAsync,
         TaskCompletionSource<bool> Completion);
 
     private sealed record ParsedMessagePayload(
