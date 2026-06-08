@@ -4,6 +4,7 @@ using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using OpenQA.Selenium.Support.UI;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting.WindowsServices;
 
 public class SendMessageResult
 {
@@ -17,13 +18,22 @@ public class WhatsAppService : IWhatsAppService, IDisposable
 {
     private readonly ChromeDriver _driver;
     private readonly string _profilePath;
+    private readonly bool _headless;
 
     public WhatsAppService(IConfiguration configuration)
     {
-        _profilePath = GetPlatformSpecificProfilePath(configuration["WhatsApp:ProfilePath"] ?? throw new InvalidOperationException());
-        _driver = InitializeDriver(configuration["WhatsApp:ChromeDriverPath"] ?? "");
+        var whatsAppSection = configuration.GetSection("WhatsApp");
+        _profilePath = GetPlatformSpecificProfilePath(whatsAppSection["ProfilePath"] ?? throw new InvalidOperationException("WhatsApp:ProfilePath is required."));
+        _headless = whatsAppSection.GetValue("Headless", IsHeadlessByDefault());
+        var hideDriverWindow = whatsAppSection.GetValue("HideDriverWindow", true);
+        var driverPath = whatsAppSection["ChromeDriverPath"] ?? "";
+
+        _driver = InitializeDriver(driverPath, hideDriverWindow);
         InitializeWhatsAppWeb();
     }
+
+    private static bool IsHeadlessByDefault() =>
+        OperatingSystem.IsWindows() && WindowsServiceHelpers.IsWindowsService();
 
     private static string GetPlatformSpecificProfilePath(string configPath)
     {
@@ -39,44 +49,69 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         return configPath;
     }
 
-    private ChromeDriver InitializeDriver(string driverPath)
+    private ChromeDriver InitializeDriver(string driverPath, bool hideDriverWindow)
     {
         var options = BuildChromeOptions();
         var trimmed = driverPath.Trim();
 
-        // Selenium Manager (built into Selenium 4.6+) downloads a ChromeDriver that matches the
-        // installed Chrome. Prefer this when no fixed path is set — avoids Homebrew driver
-        // ahead of Chrome (e.g. driver 148 vs Chrome 147).
         if (string.IsNullOrEmpty(trimmed) ||
             trimmed.Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine(
                 "WhatsApp:ChromeDriverPath empty or 'auto' — using Selenium Manager (driver matched to installed Chrome).");
-            return new ChromeDriver(options);
+            return CreateChromeDriver(null, options, hideDriverWindow);
         }
 
         try
         {
-            var service = CreateChromeDriverService(trimmed);
+            var service = CreateChromeDriverService(trimmed, hideDriverWindow);
             return new ChromeDriver(service, options);
         }
         catch (InvalidOperationException ex) when (IsChromeDriverVersionMismatch(ex))
         {
             Console.WriteLine(
                 "Configured ChromeDriver does not match installed Google Chrome. Retrying with Selenium Manager.");
-            return new ChromeDriver(options);
+            return CreateChromeDriver(null, options, hideDriverWindow);
         }
+    }
+
+    private static ChromeDriver CreateChromeDriver(
+        ChromeDriverService? service,
+        ChromeOptions options,
+        bool hideDriverWindow)
+    {
+        if (service != null)
+        {
+            if (OperatingSystem.IsWindows())
+                service.HideCommandPromptWindow = hideDriverWindow;
+            return new ChromeDriver(service, options);
+        }
+
+        service = ChromeDriverService.CreateDefaultService();
+        if (OperatingSystem.IsWindows())
+            service.HideCommandPromptWindow = hideDriverWindow;
+        return new ChromeDriver(service, options);
     }
 
     private ChromeOptions BuildChromeOptions()
     {
         var options = new ChromeOptions();
-        options.AddArgument("--start-maximized");
         options.AddArgument("--disable-notifications");
         options.AddArgument($"--user-data-dir={_profilePath}");
         options.AddArgument("--disable-gpu");
         options.AddArgument("--disable-dev-shm-usage");
         options.AddArgument("--no-sandbox");
+        options.AddArgument("--disable-software-rasterizer");
+
+        if (_headless)
+        {
+            options.AddArgument("--headless=new");
+            options.AddArgument("--window-size=1920,1080");
+        }
+        else
+        {
+            options.AddArgument("--start-maximized");
+        }
 
         var downloadPath = Path.Combine(Path.GetTempPath(), "WhatsAppDownloads");
         Directory.CreateDirectory(downloadPath);
@@ -97,42 +132,71 @@ public class WhatsAppService : IWhatsAppService, IDisposable
                 || m.Contains("Current browser version is", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static ChromeDriverService CreateChromeDriverService(string driverPath)
+    private static ChromeDriverService CreateChromeDriverService(string driverPath, bool hideDriverWindow)
     {
+        ChromeDriverService service;
+
         if (File.Exists(driverPath))
         {
             var dir = Path.GetDirectoryName(Path.GetFullPath(driverPath));
             var fileName = Path.GetFileName(driverPath);
             if (string.IsNullOrEmpty(dir))
-            {
                 dir = ".";
+
+            service = ChromeDriverService.CreateDefaultService(dir, fileName);
+        }
+        else if (Directory.Exists(driverPath))
+        {
+            service = ChromeDriverService.CreateDefaultService(driverPath);
+        }
+        else
+        {
+            var bundledDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                Environment.OSVersion.Platform == PlatformID.Unix ? "chromedriver-mac" : "chromedriver-win64");
+            if (Directory.Exists(bundledDir))
+            {
+                Console.WriteLine(
+                    $"WhatsApp:ChromeDriverPath '{driverPath}' not found; using bundled driver folder: {bundledDir}");
+                service = ChromeDriverService.CreateDefaultService(bundledDir);
             }
-
-            return ChromeDriverService.CreateDefaultService(dir, fileName);
+            else
+            {
+                Console.WriteLine(
+                    $"WhatsApp:ChromeDriverPath '{driverPath}' not found; using Selenium Manager / PATH.");
+                service = ChromeDriverService.CreateDefaultService();
+            }
         }
 
-        if (Directory.Exists(driverPath))
-        {
-            return ChromeDriverService.CreateDefaultService(driverPath);
-        }
+        if (OperatingSystem.IsWindows())
+            service.HideCommandPromptWindow = hideDriverWindow;
 
-        var bundledDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
-            Environment.OSVersion.Platform == PlatformID.Unix ? "chromedriver-mac" : "chromedriver-win64");
-        if (Directory.Exists(bundledDir))
-        {
-            Console.WriteLine(
-                $"WhatsApp:ChromeDriverPath '{driverPath}' not found; using bundled driver folder: {bundledDir}");
-            return ChromeDriverService.CreateDefaultService(bundledDir);
-        }
-
-        Console.WriteLine(
-            $"WhatsApp:ChromeDriverPath '{driverPath}' not found; using Selenium Manager / PATH (install chromedriver or run from a machine with Chrome).");
-        return ChromeDriverService.CreateDefaultService();
+        return service;
     }
 
     private void InitializeWhatsAppWeb()
     {
         _driver.Navigate().GoToUrl("https://web.whatsapp.com/");
+
+        if (_headless)
+        {
+            Console.WriteLine("Starting WhatsApp Web in headless mode — waiting for an existing session…");
+            try
+            {
+                var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(90));
+                wait.Until(d =>
+                    d.FindElements(By.XPath("//div[@id='pane-side']")).Count > 0
+                    || d.FindElements(By.XPath("//div[@contenteditable='true' and @aria-placeholder='Type a message']")).Count > 0);
+                Console.WriteLine("WhatsApp Web session is ready.");
+            }
+            catch (WebDriverTimeoutException)
+            {
+                throw new InvalidOperationException(
+                    "WhatsApp Web is not logged in. Run the app once interactively (Headless: false) " +
+                    "with the same WhatsApp:ProfilePath, scan the QR code, then restart with Headless: true.");
+            }
+            return;
+        }
+
         Console.WriteLine("Scan QR Code to log in to WhatsApp Web (you have ~20 seconds before the app continues)…");
         Thread.Sleep(20000);
         Console.WriteLine("WhatsApp Web startup pause finished — the worker will now connect to your message broker.");

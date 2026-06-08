@@ -124,6 +124,14 @@ public class WhatsAppSettings
 {
     public string ProfilePath { get; set; } = null!;
     public string ChromeDriverPath { get; set; } = null!;
+    /// <summary>
+    /// Run Chrome without a visible window. Defaults to true when running as a Windows Service.
+    /// </summary>
+    public bool Headless { get; set; }
+    /// <summary>
+    /// Hide the chromedriver console window on Windows (recommended for services).
+    /// </summary>
+    public bool HideDriverWindow { get; set; } = true;
 }
 
 public class ErpInstanceConfig
