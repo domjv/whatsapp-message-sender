@@ -18,18 +18,10 @@ class Program
                 // fast with a clear message instead of crashing after startup.
                 services.AddOptions<AppSettings>()
                     .Bind(context.Configuration)
-                    .Validate(settings =>
-                    {
-                        if (settings.MessageTracking == null)
-                            return false;
-
-                        if (string.IsNullOrWhiteSpace(settings.MessageTracking.NotificationSecret))
-                            return false;
-
-                        return Uri.TryCreate(
-                            settings.MessageTracking.ApiUrl, UriKind.Absolute, out _);
-                    },
-                    "MessageTracking must include a valid ApiUrl and NotificationSecret.")
+                    .Validate(
+                        settings => MessageTrackingRouting.ValidateAppSettings(settings, out _),
+                        "Message tracking configuration is invalid. Each configured topic/stream must " +
+                        "resolve to valid ErpInstances or MessageTracking settings.")
                     .ValidateOnStart();
                 services.AddSingleton<IWhatsAppService, WhatsAppService>();
                 services.AddSingleton<IBlobStorageService, BlobStorageService>();

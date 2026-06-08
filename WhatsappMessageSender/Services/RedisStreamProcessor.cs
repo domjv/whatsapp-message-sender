@@ -377,6 +377,7 @@ public class RedisStreamProcessor : IMessageProcessor
             await DeadLetterMessageAsync(streamName, group, entry,
                 $"Message failed after {RetrySettings.MaxRetries} attempts");
             await _messageTrackingService.TrackMessageStatusAsync(
+                messageProperties.ChannelName,
                 backendMessageId,
                 "Failed",
                 $"Message failed after {RetrySettings.MaxRetries} attempts",
@@ -398,7 +399,7 @@ public class RedisStreamProcessor : IMessageProcessor
             if (whatsAppMessage == null)
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    backendMessageId, "Failed", "Invalid message format", null, null);
+                    messageProperties.ChannelName, backendMessageId, "Failed", "Invalid message format", null, null);
                 await DeadLetterMessageAsync(streamName, group, entry,
                     "Message could not be deserialized");
                 return;
@@ -435,6 +436,7 @@ public class RedisStreamProcessor : IMessageProcessor
             {
                 var deliveredAt = DateTime.UtcNow;
                 await _messageTrackingService.TrackMessageStatusAsync(
+                    messageProperties.ChannelName,
                     backendMessageId,
                     "Sent",
                     null,
@@ -448,6 +450,7 @@ public class RedisStreamProcessor : IMessageProcessor
                 await ScheduleRetryAsync(streamName, group, entry, retryCount, sendResult.Error);
                 var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
                 await _messageTrackingService.TrackMessageStatusAsync(
+                    messageProperties.ChannelName,
                     backendMessageId,
                     "Pending",
                     $"Will retry in {delay.TotalSeconds} seconds. Error: {sendResult.Error}",
@@ -461,6 +464,7 @@ public class RedisStreamProcessor : IMessageProcessor
             await ScheduleRetryAsync(streamName, group, entry, retryCount, ex.Message);
             var delay = RetrySettings.GetDelayForRetry(retryCount + 1);
             await _messageTrackingService.TrackMessageStatusAsync(
+                messageProperties.ChannelName,
                 backendMessageId,
                 "Pending",
                 $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}",

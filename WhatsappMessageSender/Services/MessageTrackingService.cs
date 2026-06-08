@@ -21,27 +21,34 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
     };
 
     private readonly HttpClient _httpClient;
-    private readonly MessageTrackingSettings _settings;
+    private readonly IReadOnlyDictionary<string, MessageTrackingSettings> _channelTracking;
+    private readonly MessageTrackingSettings? _fallbackTracking;
 
     public MessageTrackingService(IOptions<AppSettings> options)
+        : this(options.Value, httpClient: null)
     {
-        var appSettings = options.Value
-            ?? throw new InvalidOperationException("AppSettings configuration is missing.");
+    }
 
-        _settings = appSettings.MessageTracking
-            ?? throw new InvalidOperationException(
-                "MessageTracking configuration is missing. Provide 'MessageTracking:ApiUrl' and 'MessageTracking:NotificationSecret'.");
+    internal MessageTrackingService(AppSettings appSettings, HttpClient? httpClient)
+    {
+        if (appSettings == null)
+            throw new InvalidOperationException("AppSettings configuration is missing.");
 
-        if (string.IsNullOrWhiteSpace(_settings.NotificationSecret))
+        var errors = new List<string>();
+        _channelTracking = MessageTrackingRouting.BuildChannelTrackingMap(appSettings, errors);
+        _fallbackTracking = MessageTrackingRouting.IsValidTrackingSettings(appSettings.MessageTracking)
+            ? appSettings.MessageTracking
+            : null;
+
+        if (errors.Count > 0)
+            throw new InvalidOperationException(string.Join(" ", errors.Distinct()));
+
+        if (_channelTracking.Count == 0 && _fallbackTracking == null)
             throw new InvalidOperationException(
-                "MessageTracking:NotificationSecret is required and cannot be empty.");
+                "MessageTracking configuration is missing. Provide ErpInstances and/or " +
+                "MessageTracking:ApiUrl and MessageTracking:NotificationSecret.");
 
-        if (!Uri.TryCreate(_settings.ApiUrl, UriKind.Absolute, out _))
-            throw new InvalidOperationException(
-                "MessageTracking:ApiUrl must be a valid absolute URL.");
-
-        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        _httpClient.DefaultRequestHeaders.Add("X-Notification-Secret", _settings.NotificationSecret);
+        _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
     }
 
     /// <summary>
@@ -52,6 +59,7 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
         utc.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
     public async Task TrackMessageStatusAsync(
+        string channelName,
         string messageId,
         string status,
         string? error,
@@ -59,6 +67,8 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
         DateTime? deliveredAtUtc)
     {
         Console.WriteLine($"Message {messageId} status: {status} {(error != null ? $"Error: {error}" : "")}");
+
+        var tracking = ResolveTrackingSettings(channelName);
 
         object requestBody = status switch
         {
@@ -87,7 +97,10 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
         {
             var json = JsonSerializer.Serialize(requestBody, SerializerOptions);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            using var response = await _httpClient.PostAsync(_settings.ApiUrl, content);
+            using var request = new HttpRequestMessage(HttpMethod.Post, tracking.ApiUrl) { Content = content };
+            request.Headers.Add("X-Notification-Secret", tracking.NotificationSecret);
+
+            using var response = await _httpClient.SendAsync(request);
             var responseText = await response.Content.ReadAsStringAsync();
 
             if (response.IsSuccessStatusCode)
@@ -102,6 +115,21 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
         {
             Console.WriteLine($"Failed to update message status: {ex.Message}");
         }
+    }
+
+    private MessageTrackingSettings ResolveTrackingSettings(string channelName)
+    {
+        if (!string.IsNullOrWhiteSpace(channelName)
+            && _channelTracking.TryGetValue(channelName, out var channelSettings))
+        {
+            return channelSettings;
+        }
+
+        if (_fallbackTracking != null)
+            return _fallbackTracking;
+
+        throw new InvalidOperationException(
+            $"No message tracking configured for channel '{channelName}'.");
     }
 
     public void Dispose()

@@ -358,6 +358,7 @@ public class QueueProcessor : IMessageProcessor
                 "MaxRetriesExceeded",
                 $"Message failed after {RetrySettings.MaxRetries} attempts");
             await _messageTrackingService.TrackMessageStatusAsync(
+                messageProperties.ChannelName,
                 backendMessageId,
                 "Failed",
                 $"Message failed after {RetrySettings.MaxRetries} attempts",
@@ -371,6 +372,7 @@ public class QueueProcessor : IMessageProcessor
             if (!messageProperties.MessageType.Equals("whatsapp", StringComparison.OrdinalIgnoreCase))
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
+                    messageProperties.ChannelName,
                     backendMessageId,
                     "Failed",
                     $"Unsupported message type: {messageProperties.MessageType}",
@@ -387,7 +389,7 @@ public class QueueProcessor : IMessageProcessor
             if (msg == null)
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
-                    backendMessageId, "Failed", "Invalid message format", null, null);
+                    messageProperties.ChannelName, backendMessageId, "Failed", "Invalid message format", null, null);
                 await deadLetterAsync("InvalidFormat", "Message could not be deserialized");
                 return;
             }
@@ -421,6 +423,7 @@ public class QueueProcessor : IMessageProcessor
             {
                 var deliveredAt = DateTime.UtcNow;
                 await _messageTrackingService.TrackMessageStatusAsync(
+                    messageProperties.ChannelName,
                     backendMessageId,
                     "Sent",
                     null,
@@ -432,6 +435,7 @@ public class QueueProcessor : IMessageProcessor
             else
             {
                 await _messageTrackingService.TrackMessageStatusAsync(
+                    messageProperties.ChannelName,
                     backendMessageId,
                     "Pending",
                     $"Will be retried by Service Bus delivery policy. Error: {sendResult.Error}",
@@ -447,6 +451,7 @@ public class QueueProcessor : IMessageProcessor
         catch (Exception ex)
         {
             await _messageTrackingService.TrackMessageStatusAsync(
+                messageProperties.ChannelName,
                 backendMessageId,
                 "Pending",
                 $"Will be retried by Service Bus delivery policy. Error: {ex.Message}",

@@ -20,7 +20,15 @@ public class AppSettings
     /// Optional. When null, defaults apply: priorities &lt; 10 are unlimited, others capped at 20/minute.
     /// </summary>
     public WhatsAppSendRateLimitSettings? WhatsAppSendRateLimit { get; set; }
-    public MessageTrackingSettings MessageTracking { get; set; } = null!;
+    /// <summary>
+    /// Per-ERPNext-instance tracking endpoints. When a topic/stream resolves to an instance id,
+    /// its <see cref="ErpInstanceConfig.MessageTracking"/> is used for delivery-status callbacks.
+    /// </summary>
+    public List<ErpInstanceConfig>? ErpInstances { get; set; }
+    /// <summary>
+    /// Optional fallback when a channel has no matching <see cref="ErpInstances"/> entry.
+    /// </summary>
+    public MessageTrackingSettings? MessageTracking { get; set; }
 }
 
 /// <summary>
@@ -56,6 +64,11 @@ public class StreamConfig
     public string StreamName { get; set; } = null!;
     public string ContainerName { get; set; } = null!;
     /// <summary>
+    /// ERPNext instance id for delivery-status callbacks. When omitted, resolved from
+    /// <c>stream-{instanceId}</c> or <c>hm-{instanceId}-*</c> naming (longest id match first).
+    /// </summary>
+    public string? ErpInstanceId { get; set; }
+    /// <summary>
     /// Same semantics as Service Bus topic <see cref="TopicSubscriptionConfig.Priority"/>; used for send throttling.
     /// </summary>
     public int Priority { get; set; } = 100;
@@ -83,6 +96,11 @@ public class TopicSubscriptionConfig
     public string SubscriptionName { get; set; } = null!;
     public string ContainerName { get; set; } = null!;
     /// <summary>
+    /// ERPNext instance id for delivery-status callbacks. When omitted, resolved from
+    /// <c>hm-{instanceId}-*</c> topic naming (longest id match first).
+    /// </summary>
+    public string? ErpInstanceId { get; set; }
+    /// <summary>
     /// When true, uses <c>RegisterSessionHandler</c> because the Azure subscription has sessions enabled.
     /// When false, uses <c>RegisterMessageHandler</c> for a non-session subscription.
     /// </summary>
@@ -106,6 +124,12 @@ public class WhatsAppSettings
 {
     public string ProfilePath { get; set; } = null!;
     public string ChromeDriverPath { get; set; } = null!;
+}
+
+public class ErpInstanceConfig
+{
+    public string Id { get; set; } = null!;
+    public MessageTrackingSettings MessageTracking { get; set; } = null!;
 }
 
 public class MessageTrackingSettings

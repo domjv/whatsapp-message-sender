@@ -118,7 +118,7 @@ public class QueueProcessorTests
         Assert.Null(_deadLetterReason);
         Assert.Null(_abandonedProps);
         _trackingMock.Verify(t => t.TrackMessageStatusAsync(
-            "MSG-001", "Sent", null, null, It.IsAny<DateTime?>()), Times.Once);
+            QueueName, "MSG-001", "Sent", null, null, It.IsAny<DateTime?>()), Times.Once);
     }
 
     // -------------------------------------------------------------------------
@@ -218,7 +218,7 @@ public class QueueProcessorTests
         Assert.Equal("MaxRetriesExceeded", _deadLetterReason);
         Assert.False(_completed);
         _trackingMock.Verify(t => t.TrackMessageStatusAsync(
-            "MSG-MAX-001", "Failed", It.IsAny<string>(), null, null), Times.Once);
+            QueueName, "MSG-MAX-001", "Failed", It.IsAny<string>(), null, null), Times.Once);
         _whatsAppMock.Verify(s => s.SendMessageAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
     }
 
@@ -286,7 +286,7 @@ public class QueueProcessorTests
         Assert.Null(_deadLetterReason);
         Assert.NotNull(_abandonedProps);
         _trackingMock.Verify(t => t.TrackMessageStatusAsync(
-            "MSG-FAIL-001", "Pending", It.IsAny<string>(), null, null), Times.Once);
+            QueueName, "MSG-FAIL-001", "Pending", It.IsAny<string>(), null, null), Times.Once);
     }
 
     [Fact]
@@ -348,7 +348,7 @@ public class QueueProcessorTests
         Assert.False(_completed);
         Assert.NotNull(_abandonedProps);
         _trackingMock.Verify(t => t.TrackMessageStatusAsync(
-            "MSG-EX-001", "Pending", It.Is<string>(s => s!.Contains("Chrome crashed")), null, null), Times.Once);
+            QueueName, "MSG-EX-001", "Pending", It.Is<string>(s => s!.Contains("Chrome crashed")), null, null), Times.Once);
     }
 
     // -------------------------------------------------------------------------
