@@ -124,8 +124,8 @@ priority dispatcher:
 - **Cross-topic priority** — messages from all configured subscriptions are
   enqueued to a shared priority queue; auth topics are processed first.
 - **WhatsApp send rate cap (low priority)** — topics/streams with dispatch
-  priority **≥ `WhatsAppSendRateLimit:HighPriorityLessThan`** (default 10) share a
-  sliding window of at most **`MaxSendsPerMinute`** successful sends (default 20).
+  priority **≥ `WhatsAppSendRateLimit:HighPriorityLessThan`** (default 10) reserve
+  at most **`MaxSendsPerMinute`** send slots per rolling minute (default 20).
   Priorities **&lt; 10** bypass the cap and proceed immediately when they reach
   the head of the queue.
 - **Single-send guarantee** — even with multiple subscriptions and concurrent
@@ -163,7 +163,9 @@ typed message, attachment context). To prevent that:
 - Result: per-process WhatsApp sends are one-at-a-time and deterministic.
 
 This approach favors correctness over peak throughput for Selenium-based
-automation.
+automation. To use several WhatsApp numbers, run several service instances and
+assign each instance a unique `WhatsApp:ProfilePath`; see
+[`multi-instance-services.md`](multi-instance-services.md).
 
 ---
 
@@ -186,7 +188,7 @@ automation.
 {
   "MessageBroker": "Redis",
   "BlobStorage":   { "ConnectionString": "…" },
-  "WhatsApp":      { "ProfilePath": "…", "ChromeDriverPath": "…" },
+  "WhatsApp":      { "ProfilePath": "…", "ChromeDriverPath": "…", "StartupWaitSeconds": 120 },
   "MessageTracking": { "ApiUrl": "…", "NotificationSecret": "…" },
   "WhatsAppSendRateLimit": {
     "Enabled": true,
@@ -205,6 +207,7 @@ automation.
   "ConsumerName":               "whatsapp-sender-1",
   "MaxConcurrentCalls":         2,
   "PendingMessageTimeoutSeconds": 300,
+  "RetrySchedulerBatchSize": 100,
   "Streams": [
     { "StreamName": "stream-pleasntbiz", "ContainerName": "pleasantbiz-attachments" }
   ]
@@ -343,11 +346,13 @@ Retry delay formula: `min(30 × 2^(retryCount-1), 3600)` seconds.
   per-call `new HttpClient()`), disposes each `HttpResponseMessage` after the request, sets a request
   timeout, and implements `IDisposable` so sockets are released on shutdown.
 - **Semaphores:** `QueueProcessor` and `RedisStreamProcessor` dispose `SemaphoreSlim` instances in `Dispose()`.
-- **Blob temp files:** Downloads go under `%TEMP%/BlobDownloads/<guid>/`. Those files are not deleted
-  automatically after send; for sustained attachment traffic, add explicit cleanup after WhatsApp send
-  (or periodic temp sweeping) to avoid disk growth.
-- **Selenium:** One browser session per worker process is intentional; scale out with more processes
-  rather than more concurrent sends in one driver.
+- **Blob temp files:** Downloads go under `%TEMP%/BlobDownloads/<guid>/`. The processors delete
+  downloaded attachment files and empty GUID directories after each send attempt finishes.
+- **Selenium:** One browser session per worker process is intentional; scale out with more service
+  instances, each with a unique `WhatsApp:ProfilePath`, rather than more concurrent sends in one driver.
+- **Chrome profile locking:** `WhatsAppService` holds an exclusive `.whatsapp-message-sender.lock`
+  file inside `WhatsApp:ProfilePath` so two running service instances cannot accidentally share one
+  Chrome user-data directory.
 - **GC:** The steady path is low allocation (JSON parse per message). For production hosts, enable
   **server GC** (`"System.GC.Server": true` in `runtimeconfig.template.json` / project SDK settings, or
   `DOTNET_gcServer=1`) so generation collections match server workloads.

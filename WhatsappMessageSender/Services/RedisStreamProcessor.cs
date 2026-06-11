@@ -295,39 +295,53 @@ public class RedisStreamProcessor : IMessageProcessor
 
                 var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-                var dueEntries = await _db!.SortedSetRangeByScoreWithScoresAsync(
-                    retryKey, start: 0, stop: now);
-
-                foreach (var entry in dueEntries)
+                var batchSize = Math.Max(1, _appSettings.Redis!.RetrySchedulerBatchSize);
+                while (!token.IsCancellationRequested)
                 {
-                    var json = entry.Element.ToString();
-                    RetryEntry? retry = null;
-                    try
+                    var dueEntries = await _db!.SortedSetRangeByScoreWithScoresAsync(
+                        retryKey, start: 0, stop: now, take: batchSize);
+
+                    if (dueEntries.Length == 0)
                     {
-                        retry = JsonConvert.DeserializeObject<RetryEntry>(json);
+                        break;
                     }
-                    catch (Exception ex)
+
+                    foreach (var entry in dueEntries)
                     {
-                        Console.WriteLine($"Failed to deserialize retry entry: {ex.Message}");
+                        var json = entry.Element.ToString();
+                        RetryEntry? retry = null;
+                        try
+                        {
+                            retry = JsonConvert.DeserializeObject<RetryEntry>(json);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Failed to deserialize retry entry: {ex.Message}");
+                            await _db.SortedSetRemoveAsync(retryKey, json);
+                            continue;
+                        }
+
+                        if (retry == null)
+                        {
+                            await _db.SortedSetRemoveAsync(retryKey, json);
+                            continue;
+                        }
+
+                        var fields = retry.OriginalData
+                            .Select(kv => new NameValueEntry(kv.Key, kv.Value))
+                            .Append(new NameValueEntry("retry_count", retry.RetryCount.ToString()))
+                            .ToArray();
+
+                        await _db.StreamAddAsync(streamName, fields);
                         await _db.SortedSetRemoveAsync(retryKey, json);
-                        continue;
+                        Console.WriteLine(
+                            $"Re-queued retry #{retry.RetryCount} from '{retryKey}' to '{streamName}'");
                     }
 
-                    if (retry == null)
+                    if (dueEntries.Length < batchSize)
                     {
-                        await _db.SortedSetRemoveAsync(retryKey, json);
-                        continue;
+                        break;
                     }
-
-                    var fields = retry.OriginalData
-                        .Select(kv => new NameValueEntry(kv.Key, kv.Value))
-                        .Append(new NameValueEntry("retry_count", retry.RetryCount.ToString()))
-                        .ToArray();
-
-                    await _db.StreamAddAsync(streamName, fields);
-                    await _db.SortedSetRemoveAsync(retryKey, json);
-                    Console.WriteLine(
-                        $"Re-queued retry #{retry.RetryCount} from '{retryKey}' to '{streamName}'");
                 }
             }
             catch (OperationCanceledException)
@@ -386,6 +400,7 @@ public class RedisStreamProcessor : IMessageProcessor
             return;
         }
 
+        string? filePath = null;
         try
         {
             if (!messageProperties.MessageType.Equals("whatsapp", StringComparison.OrdinalIgnoreCase))
@@ -407,7 +422,6 @@ public class RedisStreamProcessor : IMessageProcessor
 
             backendMessageId = whatsAppMessage.MessageId ?? messageName;
 
-            string? filePath = null;
             if (!string.IsNullOrEmpty(whatsAppMessage.AttachmentUrl) &&
                 _streamContainerMapping.TryGetValue(messageProperties.ChannelName, out var containerName))
             {
@@ -416,10 +430,10 @@ public class RedisStreamProcessor : IMessageProcessor
             }
 
             SendMessageResult sendResult;
+            await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
             await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
             try
             {
-                await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
                 sendResult = await _whatsAppService.SendMessageAsync(
                     whatsAppMessage.Phone, whatsAppMessage.Message, filePath);
                 if (sendResult.Success)
@@ -470,6 +484,10 @@ public class RedisStreamProcessor : IMessageProcessor
                 $"Will retry in {delay.TotalSeconds} seconds. Error: {ex.Message}",
                 null,
                 null);
+        }
+        finally
+        {
+            AttachmentFileCleanup.DeleteDownloadedAttachment(filePath);
         }
     }
 

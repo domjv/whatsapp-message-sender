@@ -23,4 +23,15 @@ public class WhatsAppSendRateLimiterTests
         limiter.NotifySuccessfulSendIfThrottled(100);
         await limiter.WaitForSendSlotAsync(100);
     }
+
+    [Fact]
+    public async Task ThrottledTraffic_ReservesSlotBeforeSendToPreventConcurrentOversubscription()
+    {
+        var limiter = new WhatsAppSendRateLimiter(highPriorityLessThan: 10, maxSendsPerMinute: 1, enabled: true);
+
+        await limiter.WaitForSendSlotAsync(100);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        await Assert.ThrowsAsync<TaskCanceledException>(() => limiter.WaitForSendSlotAsync(100, cts.Token));
+    }
 }
