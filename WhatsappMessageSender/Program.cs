@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using WhatsappMessageSender.Logging;
 using WhatsappMessageSender.Models;
 using WhatsappMessageSender.Services;
 
@@ -15,6 +16,9 @@ class Program
     static async Task Main(string[] args)
     {
         var builder = Host.CreateApplicationBuilder(args);
+
+        var logDirectory = LoggingBootstrap.Configure(builder.Configuration);
+        Console.WriteLine($"Logging to {logDirectory} (daily rolling files, prefix whatsapp-sender-)");
 
         if (OperatingSystem.IsWindows())
         {

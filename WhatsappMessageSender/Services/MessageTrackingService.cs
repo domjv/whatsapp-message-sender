@@ -77,19 +77,22 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
                 MessageId = messageId,
                 Status = "Sent",
                 DeliveredAt = FormatDeliveredAtUtc(deliveredAtUtc ?? DateTime.UtcNow),
-                ProviderMessageId = providerMessageId
+                ProviderMessageId = providerMessageId,
+                NotificationSecret = tracking.NotificationSecret
             },
             "Failed" => new FailedPayload
             {
                 MessageId = messageId,
                 Status = "Failed",
                 ErrorMessage = string.IsNullOrWhiteSpace(error) ? "Unknown delivery failure." : error,
-                ProviderMessageId = providerMessageId
+                ProviderMessageId = providerMessageId,
+                NotificationSecret = tracking.NotificationSecret
             },
             _ => new PendingPayload
             {
                 MessageId = messageId,
-                Status = "Pending"
+                Status = "Pending",
+                NotificationSecret = tracking.NotificationSecret
             }
         };
 
@@ -109,7 +112,7 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
                 return;
             }
 
-            LogHttpFailure(response.StatusCode, responseText, messageId);
+            LogHttpFailure(response.StatusCode, responseText, messageId, channelName, tracking.ApiUrl);
         }
         catch (Exception ex)
         {
@@ -137,11 +140,28 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
         _httpClient.Dispose();
     }
 
-    private static void LogHttpFailure(HttpStatusCode status, string responseText, string messageId)
+    private static void LogHttpFailure(
+        HttpStatusCode status,
+        string responseText,
+        string messageId,
+        string channelName,
+        string apiUrl)
     {
         var snippet = responseText.Length > 500 ? responseText[..500] + "…" : responseText;
         Console.WriteLine(
-            $"Failed to update message status for {messageId}: HTTP {(int)status} {status}. Body: {snippet}");
+            $"Failed to update message status for {messageId} " +
+            $"(channel: {channelName}, url: {apiUrl}): HTTP {(int)status} {status}. Body: {snippet}");
+
+        if (status == HttpStatusCode.Forbidden &&
+            responseText.Contains("PermissionError", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine(
+                "Hint: ERPNext returned PermissionError. If the secret is correct, check: " +
+                "(1) report_delivery_status has @frappe.whitelist(allow_guest=True), " +
+                "(2) nginx/reverse proxy forwards X-Notification-Secret, " +
+                "(3) the endpoint uses ignore_permissions when updating notification records, " +
+                "(4) test directly against bench port 8000 to bypass the proxy.");
+        }
 
         if (status == HttpStatusCode.NotFound &&
             responseText.Contains("message_id not found", StringComparison.OrdinalIgnoreCase))
@@ -165,6 +185,7 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
         public string Status { get; set; } = "Sent";
         public string? DeliveredAt { get; set; }
         public string? ProviderMessageId { get; set; }
+        public string? NotificationSecret { get; set; }
     }
 
     private sealed class FailedPayload
@@ -173,11 +194,13 @@ public sealed class MessageTrackingService : IMessageTrackingService, IDisposabl
         public string Status { get; set; } = "Failed";
         public string ErrorMessage { get; set; } = null!;
         public string? ProviderMessageId { get; set; }
+        public string? NotificationSecret { get; set; }
     }
 
     private sealed class PendingPayload
     {
         public string MessageId { get; set; } = null!;
         public string Status { get; set; } = "Pending";
+        public string? NotificationSecret { get; set; }
     }
 }

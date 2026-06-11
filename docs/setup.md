@@ -169,6 +169,26 @@ Add one entry per ERPNext site. The `NotificationSecret` must match what ERPNext
 
 Topics with priority 0–9 send immediately. Priorities 10+ share a cap of 20 successful sends per minute.
 
+### File logging
+
+```json
+{
+  "FileLogging": {
+    "LogDirectory": "logs",
+    "FileNamePrefix": "whatsapp-sender",
+    "WriteToConsole": false,
+    "RetainedFileCountLimit": 31
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `LogDirectory` | Folder for daily log files (absolute or relative to app directory) |
+| `FileNamePrefix` | File name pattern: `{prefix}-yyyy-MM-dd.log` |
+| `WriteToConsole` | When `true`, also print to terminal (useful for local dev) |
+| `RetainedFileCountLimit` | Number of daily files to keep |
+
 ### Blob storage (optional)
 
 Only needed for messages with attachments:

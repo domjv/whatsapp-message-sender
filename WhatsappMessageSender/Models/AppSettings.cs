@@ -29,6 +29,10 @@ public class AppSettings
     /// Optional fallback when a channel has no matching <see cref="ErpInstances"/> entry.
     /// </summary>
     public MessageTrackingSettings? MessageTracking { get; set; }
+    /// <summary>
+    /// Optional. When null, daily file logging defaults apply (see <see cref="FileLoggingSettings"/>).
+    /// </summary>
+    public FileLoggingSettings? FileLogging { get; set; }
 }
 
 /// <summary>
@@ -144,4 +148,21 @@ public class MessageTrackingSettings
 {
     public string ApiUrl { get; set; } = null!;
     public string NotificationSecret { get; set; } = null!;
+}
+
+public class FileLoggingSettings
+{
+    /// <summary>
+    /// Directory for daily log files. Relative paths are under the app base directory.
+    /// </summary>
+    public string LogDirectory { get; set; } = "logs";
+    public string FileNamePrefix { get; set; } = "whatsapp-sender";
+    /// <summary>
+    /// When false, output goes to log files only (recommended for Windows Service).
+    /// </summary>
+    public bool WriteToConsole { get; set; }
+    /// <summary>
+    /// Number of daily log files to keep. Older files are deleted on rotation.
+    /// </summary>
+    public int RetainedFileCountLimit { get; set; } = 31;
 }

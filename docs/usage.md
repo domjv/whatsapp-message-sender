@@ -91,34 +91,46 @@ After each send attempt the worker POSTs to the ERPNext instance that owns the t
 
 ### Windows Service
 
-**Event Viewer:**
+**Log files** (primary — one file per day):
+
+```
+C:\ProgramData\WhatsappMessageSender\logs\whatsapp-sender-2026-06-06.log
+```
+
+Configure in `appsettings.Production.json`:
+
+```json
+"FileLogging": {
+  "LogDirectory": "C:\\ProgramData\\WhatsappMessageSender\\logs",
+  "FileNamePrefix": "whatsapp-sender",
+  "WriteToConsole": false,
+  "RetainedFileCountLimit": 31
+}
+```
+
+`WriteToConsole: false` means all output goes to log files only (recommended for services). Set `WriteToConsole: true` during interactive debugging.
+
+**Windows Event Viewer** (host/framework errors only):
 
 ```
 eventvwr.msc → Windows Logs → Application → Source: WhatsappMessageSender
 ```
 
-**PowerShell:**
-
-```powershell
-Get-EventLog -LogName Application -Source WhatsappMessageSender -Newest 20
-```
-
-Key log messages:
-
 | Message | Meaning |
 |---------|---------|
+| `Logging to ...` | Daily log file location on startup |
 | `Started processing topic/subscription` | Connected to a Service Bus topic |
 | `WhatsApp Web session is ready` | Chrome logged in successfully |
 | `Processing message: ...` | Handling a notification |
 | `Message ... sent via topic: ...` | Send succeeded |
 | `Failed to update message status` | ERPNext callback failed — check URL/secret |
 
-### Local / console
+### Local development
 
-All output goes to stdout. Pipe to a file if needed:
+Output goes to daily log files under `logs/` (see `FileLogging` in `appsettings.json`). With `WriteToConsole: true`, the same lines also appear in the terminal.
 
 ```bash
-dotnet run 2>&1 | tee whatsapp-sender.log
+tail -f logs/whatsapp-sender-$(date +%Y-%m-%d).log
 ```
 
 ### Azure Service Bus

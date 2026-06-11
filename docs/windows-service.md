@@ -6,14 +6,28 @@ Run the WhatsApp Message Sender as a background Windows Service with **no visibl
 
 ## Overview
 
-| Mode | Chrome window | Console | Auto-start on boot |
-|------|--------------|---------|-------------------|
-| `dotnet run` (dev) | Visible (unless Headless) | Visible | No |
-| Windows Service | Hidden (headless) | Hidden | Yes |
+| Chrome window | Console | Log files | Auto-start on boot |
+|------|--------------|---------|-----------|-------------------|
+| `dotnet run` (dev) | Optional (`WriteToConsole`) | Yes (`logs/`) | No |
+| Windows Service | No | Yes (`C:\ProgramData\...\logs\`) | Yes |
 
-The service name is **`WhatsappMessageSender`**. Logs are written to **Windows Event Viewer → Application** (source: `WhatsappMessageSender`).
+The service name is **`WhatsappMessageSender`**. Application output is written to **daily log files** (see below). Windows Event Viewer captures host-level errors only.
 
----
+## Log files
+
+By default (Production config):
+
+```
+C:\ProgramData\WhatsappMessageSender\logs\whatsapp-sender-yyyy-MM-dd.log
+```
+
+One file is created per day. Files older than 31 days are deleted automatically.
+
+View today's log:
+
+```powershell
+Get-Content "C:\ProgramData\WhatsappMessageSender\logs\whatsapp-sender-$(Get-Date -Format yyyy-MM-dd).log" -Wait
+```
 
 ## Requirements
 
@@ -146,9 +160,12 @@ eventvwr.msc
 Look for log lines like:
 
 ```
+Logging to C:\ProgramData\WhatsappMessageSender\logs ...
 Started processing topic/subscription (sessions): hm-ivyliving-auth/whatsapp-message-sender
 WhatsApp Web session is ready.
 ```
+
+Or tail the log file (see **Log files** above).
 
 ---
 
