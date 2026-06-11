@@ -149,6 +149,13 @@ Set the service environment variable to select the right file:
 DOTNET_ENVIRONMENT=ajk
 ```
 
+## Windows setup
+
+Windows is supported via native Windows Service hosting, but visible Chrome/QR
+operation is often more reliable from a signed-in desktop session. See
+[`windows-service-setup.md`](windows-service-setup.md) for both native Windows
+Service and Task Scheduler setup options.
+
 ## Example Linux systemd unit
 
 Create one unit per ERP instance, changing only the name and environment:
@@ -200,7 +207,7 @@ numbers until you have measurements from your machine:
 Recommended budget: **about 1.0-1.3 GB RAM per service instance**, plus
 operating-system headroom.
 
-For an **i7 machine with 8 GB RAM**:
+For a **Linux/minimal i7 machine with 8 GB RAM**:
 
 - reserve about 2 GB for OS, Chrome shared overhead, monitoring, antivirus, and
   safety headroom;
@@ -209,9 +216,14 @@ For an **i7 machine with 8 GB RAM**:
 - possible with careful monitoring and low traffic: **up to 5 instances**;
 - not recommended without more RAM: **6+ instances**.
 
-If the machine starts swapping, reduce instance count immediately. Chrome under
-swap can become slow enough to cause Service Bus lock renewal pressure, retries,
-or failed sends.
+For a **Windows i7 machine with 8 GB RAM**, reserve more headroom for Windows,
+Defender/antivirus, desktop services, and paging. Use **2 to 3 instances** for
+production, **4 only after monitoring**, and avoid **5+** unless RAM is upgraded.
+See [`windows-service-setup.md`](windows-service-setup.md#windows-resource-planning-for-i7--8-gb-ram).
+
+If the machine starts swapping or paging, reduce instance count immediately.
+Chrome under memory pressure can become slow enough to cause Service Bus lock
+renewal pressure, retries, or failed sends.
 
 ## Operational checklist
 

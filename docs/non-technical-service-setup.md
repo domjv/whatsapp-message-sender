@@ -96,14 +96,21 @@ If the wrong messages are configured, the wrong WhatsApp number may send them.
 
 ### Do not run too many services on a small machine
 
-Chrome uses a lot of memory. On an i7 computer with 8 GB RAM, plan for:
+Chrome uses a lot of memory. On an i7 Windows computer with 8 GB RAM, plan for:
 
-- **recommended:** 3 to 4 sender services;
-- **possible after monitoring:** 5 sender services;
-- **avoid:** 6 or more sender services unless RAM is upgraded.
+- **recommended:** 2 to 3 sender services;
+- **possible after monitoring:** 4 sender services;
+- **avoid:** 5 or more sender services unless RAM is upgraded.
 
-If the server becomes slow or starts using swap/page file heavily, reduce the
-number of services or upgrade RAM.
+On a lighter Linux server, 3 to 4 services may be reasonable, but always monitor
+RAM. If the server becomes slow or starts using swap/page file heavily, reduce
+the number of services or upgrade RAM.
+
+## Windows setup
+
+For Windows, follow the dedicated guide: [`windows-service-setup.md`](windows-service-setup.md).
+It includes native Windows Service commands and a Task Scheduler option that is
+often easier for visible Chrome and QR-code login.
 
 ## Simple Linux service commands
 
