@@ -17,26 +17,98 @@ public class WhatsAppService : IWhatsAppService, IDisposable
 {
     private readonly ChromeDriver _driver;
     private readonly string _profilePath;
+    private readonly FileStream _profileLockStream;
 
     public WhatsAppService(IConfiguration configuration)
     {
         _profilePath = GetPlatformSpecificProfilePath(configuration["WhatsApp:ProfilePath"] ?? throw new InvalidOperationException());
-        _driver = InitializeDriver(configuration["WhatsApp:ChromeDriverPath"] ?? "");
-        InitializeWhatsAppWeb();
+        _profileLockStream = AcquireProfileLock(_profilePath);
+
+        ChromeDriver? driver = null;
+        try
+        {
+            driver = InitializeDriver(configuration["WhatsApp:ChromeDriverPath"] ?? "");
+            _driver = driver;
+            InitializeWhatsAppWeb(GetStartupWaitSeconds(configuration));
+        }
+        catch
+        {
+            if (driver != null)
+            {
+                try
+                {
+                    driver.Quit();
+                }
+                finally
+                {
+                    driver.Dispose();
+                }
+            }
+
+            _profileLockStream.Dispose();
+            throw;
+        }
     }
 
     private static string GetPlatformSpecificProfilePath(string configPath)
     {
+        string profilePath;
         if (string.IsNullOrEmpty(configPath))
         {
-            return Path.Combine(
+            profilePath = Path.Combine(
                 (Environment.OSVersion.Platform == PlatformID.Unix
                     ? Environment.GetEnvironmentVariable("HOME")
                     : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)) ?? throw new InvalidOperationException(),
                 "WhatsAppProfile"
             );
         }
-        return configPath;
+        else
+        {
+            profilePath = configPath;
+        }
+
+        return Path.GetFullPath(profilePath);
+    }
+
+    private static FileStream AcquireProfileLock(string profilePath)
+    {
+        Directory.CreateDirectory(profilePath);
+        var lockPath = Path.Combine(profilePath, ".whatsapp-message-sender.lock");
+
+        try
+        {
+            var lockStream = new FileStream(
+                lockPath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None);
+
+            lockStream.SetLength(0);
+            using var writer = new StreamWriter(lockStream, leaveOpen: true);
+            writer.WriteLine($"ProcessId={Environment.ProcessId}");
+            writer.WriteLine($"MachineName={Environment.MachineName}");
+            writer.WriteLine($"StartedUtc={DateTime.UtcNow:o}");
+            writer.Flush();
+            lockStream.Flush();
+            lockStream.Position = 0;
+
+            Console.WriteLine($"WhatsApp: using Chrome profile path '{profilePath}'.");
+            return lockStream;
+        }
+        catch (IOException ex)
+        {
+            throw new InvalidOperationException(
+                $"Chrome profile path '{profilePath}' is already locked by another running sender instance. " +
+                "Each service instance must use a unique WhatsApp:ProfilePath.",
+                ex);
+        }
+    }
+
+    private static int GetStartupWaitSeconds(IConfiguration configuration)
+    {
+        return int.TryParse(configuration["WhatsApp:StartupWaitSeconds"], out var seconds)
+            ? Math.Max(1, seconds)
+            : 120;
     }
 
     private ChromeDriver InitializeDriver(string driverPath)
@@ -130,12 +202,38 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         return ChromeDriverService.CreateDefaultService();
     }
 
-    private void InitializeWhatsAppWeb()
+    private void InitializeWhatsAppWeb(int startupWaitSeconds)
     {
         _driver.Navigate().GoToUrl("https://web.whatsapp.com/");
-        Console.WriteLine("Scan QR Code to log in to WhatsApp Web (you have ~20 seconds before the app continues)…");
-        Thread.Sleep(20000);
-        Console.WriteLine("WhatsApp Web startup pause finished — the worker will now connect to your message broker.");
+        Console.WriteLine(
+            $"Waiting up to {startupWaitSeconds} seconds for WhatsApp Web login on profile '{_profilePath}'. " +
+            "Scan the QR code if this is the first start for this profile.");
+
+        var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(startupWaitSeconds))
+        {
+            PollingInterval = TimeSpan.FromSeconds(1)
+        };
+        wait.IgnoreExceptionTypes(typeof(NoSuchElementException), typeof(StaleElementReferenceException));
+
+        try
+        {
+            wait.Until(IsWhatsAppWebLoggedIn);
+            Console.WriteLine("WhatsApp Web is logged in — the worker will now connect to your message broker.");
+        }
+        catch (WebDriverTimeoutException ex)
+        {
+            throw new InvalidOperationException(
+                $"WhatsApp Web was not logged in within {startupWaitSeconds} seconds for Chrome profile '{_profilePath}'. " +
+                "Scan the QR code or increase WhatsApp:StartupWaitSeconds before running this instance as a service.",
+                ex);
+        }
+    }
+
+    private static bool IsWhatsAppWebLoggedIn(IWebDriver driver)
+    {
+        return driver.FindElements(By.XPath("//div[@aria-label='Chat list']")).Count > 0
+            || driver.FindElements(By.XPath("//div[@role='textbox' and @contenteditable='true']")).Count > 0
+            || driver.FindElements(By.XPath("//div[@data-testid='chat-list']")).Count > 0;
     }
 
     public async Task<SendMessageResult> SendMessageAsync(string phoneNumber, string textMessage, string? filePath)
@@ -222,7 +320,14 @@ public class WhatsAppService : IWhatsAppService, IDisposable
 
     public void Dispose()
     {
-        _driver.Quit();
-        _driver.Dispose();
+        try
+        {
+            _driver.Quit();
+        }
+        finally
+        {
+            _driver.Dispose();
+            _profileLockStream.Dispose();
+        }
     }
 }

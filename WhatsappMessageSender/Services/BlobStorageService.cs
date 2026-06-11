@@ -63,14 +63,14 @@ public class BlobStorageService : IBlobStorageService
 
         try
         {
-            var tempDirPath = Path.Combine(Path.GetTempPath(), "BlobDownloads", Guid.NewGuid().ToString());
-            Directory.CreateDirectory(tempDirPath);
-
             var extension = Path.GetExtension(blobUrl);
             if (string.IsNullOrEmpty(extension))
             {
                 return null;
             }
+
+            var tempDirPath = Path.Combine(Path.GetTempPath(), "BlobDownloads", Guid.NewGuid().ToString());
+            Directory.CreateDirectory(tempDirPath);
 
             var filePath = Path.Combine(tempDirPath, $"{fileName}{extension}");
 

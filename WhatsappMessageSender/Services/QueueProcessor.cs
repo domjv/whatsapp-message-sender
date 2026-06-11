@@ -367,6 +367,7 @@ public class QueueProcessor : IMessageProcessor
             return;
         }
 
+        string? filePath = null;
         try
         {
             if (!messageProperties.MessageType.Equals("whatsapp", StringComparison.OrdinalIgnoreCase))
@@ -394,7 +395,6 @@ public class QueueProcessor : IMessageProcessor
                 return;
             }
 
-            string? filePath = null;
             if (!string.IsNullOrEmpty(msg.AttachmentUrl) &&
                 _topicContainerMapping.TryGetValue(messageProperties.ChannelName, out var containerName))
             {
@@ -403,10 +403,10 @@ public class QueueProcessor : IMessageProcessor
             }
 
             SendMessageResult sendResult;
+            await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
             await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
             try
             {
-                await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
                 sendResult = await _whatsAppService.SendMessageAsync(
                     msg.Phone, msg.Message, filePath);
                 if (sendResult.Success)
@@ -462,6 +462,10 @@ public class QueueProcessor : IMessageProcessor
                 { "RetryCount", deliveryCount },
                 { "LastError", ex.Message }
             });
+        }
+        finally
+        {
+            AttachmentFileCleanup.DeleteDownloadedAttachment(filePath);
         }
     }
 

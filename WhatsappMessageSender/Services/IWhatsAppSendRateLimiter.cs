@@ -9,13 +9,14 @@ public interface IWhatsAppSendRateLimiter
     /// <summary>
     /// Blocks until a send slot is available for the given dispatch priority, or returns
     /// immediately when the message is high priority or rate limiting is disabled.
-    /// Must be called under the same mutual exclusion as <see cref="IWhatsAppService.SendMessageAsync"/>
-    /// when multiple workers could send in parallel (e.g. Redis Streams).
+    /// Should be called before entering the exclusive <see cref="IWhatsAppService.SendMessageAsync"/>
+    /// section so throttled low-priority traffic does not block high-priority sends.
     /// </summary>
     Task WaitForSendSlotAsync(int dispatchPriority, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Records a successful send toward the per-minute cap when the message was subject to throttling.
+    /// Called after a successful send when the message was subject to throttling.
+    /// Current implementation reserves throttled slots before send to avoid concurrent oversubscription.
     /// </summary>
     void NotifySuccessfulSendIfThrottled(int dispatchPriority);
 }

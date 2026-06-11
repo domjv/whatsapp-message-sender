@@ -1,14 +1,14 @@
 namespace WhatsappMessageSender.Services;
 
 /// <summary>
-/// Sliding-window limit: at most <see cref="MaxSendsPerMinute"/> successful sends per UTC minute
+/// Sliding-window limit: reserves at most <see cref="MaxSendsPerMinute"/> throttled send slots per UTC minute
 /// for messages whose dispatch priority is greater than or equal to <see cref="HighPriorityLessThan"/>.
 /// Priorities strictly less than that value bypass the cap (immediate).
 /// </summary>
 public sealed class WhatsAppSendRateLimiter : IWhatsAppSendRateLimiter
 {
     private readonly object _gate = new();
-    private readonly Queue<DateTime> _successUtc = new();
+    private readonly Queue<DateTime> _reservedSlotUtc = new();
     private readonly int _highPriorityLessThan;
     private readonly int _maxPerMinute;
     private readonly bool _enabled;
@@ -37,13 +37,15 @@ public sealed class WhatsAppSendRateLimiter : IWhatsAppSendRateLimiter
             TimeSpan wait;
             lock (_gate)
             {
-                PruneOlderThanOneMinute(DateTime.UtcNow);
-                if (_successUtc.Count < _maxPerMinute)
+                var now = DateTime.UtcNow;
+                PruneOlderThanOneMinute(now);
+                if (_reservedSlotUtc.Count < _maxPerMinute)
                 {
+                    _reservedSlotUtc.Enqueue(now);
                     return;
                 }
 
-                var oldest = _successUtc.Peek();
+                var oldest = _reservedSlotUtc.Peek();
                 wait = oldest.AddMinutes(1) - DateTime.UtcNow;
                 if (wait < TimeSpan.FromMilliseconds(50))
                 {
@@ -57,24 +59,18 @@ public sealed class WhatsAppSendRateLimiter : IWhatsAppSendRateLimiter
 
     public void NotifySuccessfulSendIfThrottled(int dispatchPriority)
     {
-        if (!_enabled || dispatchPriority < _highPriorityLessThan)
-        {
-            return;
-        }
-
-        lock (_gate)
-        {
-            PruneOlderThanOneMinute(DateTime.UtcNow);
-            _successUtc.Enqueue(DateTime.UtcNow);
-        }
+        // WaitForSendSlotAsync reserves the throttled slot before the Selenium send
+        // semaphore is entered. Keeping this method as a no-op preserves the public
+        // processor flow while preventing concurrent waiters from oversubscribing
+        // the configured per-minute cap.
     }
 
     private void PruneOlderThanOneMinute(DateTime utcNow)
     {
         var cutoff = utcNow.AddMinutes(-1);
-        while (_successUtc.Count > 0 && _successUtc.Peek() < cutoff)
+        while (_reservedSlotUtc.Count > 0 && _reservedSlotUtc.Peek() < cutoff)
         {
-            _successUtc.Dequeue();
+            _reservedSlotUtc.Dequeue();
         }
     }
 }

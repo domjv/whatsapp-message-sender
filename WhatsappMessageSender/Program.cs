@@ -12,6 +12,11 @@ class Program
     static async Task Main(string[] args)
     {
         var host = Host.CreateDefaultBuilder(args)
+            .UseWindowsService(options =>
+            {
+                options.ServiceName = Environment.GetEnvironmentVariable("WHATSAPP_SENDER_SERVICE_NAME")
+                    ?? "WhatsApp Message Sender";
+            })
             .ConfigureServices((context, services) =>
             {
                 // Validate critical settings during startup so the service fails

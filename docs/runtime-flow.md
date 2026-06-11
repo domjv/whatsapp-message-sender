@@ -41,13 +41,15 @@ sends are one-at-a-time per process.
 
 ### WhatsApp send rate limit (low priority)
 
-Immediately before `SendMessageAsync`, both processors await
-`IWhatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority)` **inside** the
-send semaphore. Topics/streams with `Priority >= WhatsAppSendRateLimit:HighPriorityLessThan`
-(default **10**) are throttled to **`MaxSendsPerMinute`** successful sends per
-rolling minute (default **20**). Lower numeric priorities (e.g. `0` for auth)
-bypass the wait. After a **successful** throttled send, the limiter records a
-timestamp for the sliding window.
+Before entering the exclusive Selenium send semaphore, both processors await
+`IWhatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority)`. Topics/streams
+with `Priority >= WhatsAppSendRateLimit:HighPriorityLessThan` (default **10**)
+reserve at most **`MaxSendsPerMinute`** send slots per rolling minute (default
+**20**). Lower numeric priorities (e.g. `0` for auth) bypass the wait. The slot
+is reserved before the browser lock is entered so concurrent waiters cannot
+oversubscribe the cap. Waiting outside the semaphore prevents a throttled
+low-priority message from holding the browser lock while a high-priority message
+is ready.
 
 ```mermaid
 sequenceDiagram

@@ -56,6 +56,11 @@ public class RedisSettings
     public string ConsumerName { get; set; } = Environment.MachineName;
     public int MaxConcurrentCalls { get; set; } = 2;
     public int PendingMessageTimeoutSeconds { get; set; } = 300;
+    /// <summary>
+    /// Maximum number of due retry entries loaded from Redis per scheduler pass.
+    /// Keeps large retry backlogs from being read into memory at once.
+    /// </summary>
+    public int RetrySchedulerBatchSize { get; set; } = 100;
     public List<StreamConfig> Streams { get; set; } = null!;
 }
 
@@ -124,6 +129,11 @@ public class WhatsAppSettings
 {
     public string ProfilePath { get; set; } = null!;
     public string ChromeDriverPath { get; set; } = null!;
+    /// <summary>
+    /// Maximum startup time to wait for WhatsApp Web to be logged in before broker consumption starts.
+    /// Increase this for first-time QR linking.
+    /// </summary>
+    public int StartupWaitSeconds { get; set; } = 120;
 }
 
 public class ErpInstanceConfig
