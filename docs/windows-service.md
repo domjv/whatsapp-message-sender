@@ -231,6 +231,43 @@ InvalidOperationException: WhatsApp Web is not logged in. Run the app once inter
 
 Log in as the service account user with `Headless: false`, scan QR, then restart the service with `Headless: true`.
 
+### Chrome failed to start / DevToolsActivePort
+
+```
+session not created: Chrome failed to start: crashed.
+DevToolsActivePort file doesn't exist
+```
+
+Chrome cannot run in Session 0 under **LocalSystem**. Fix:
+
+1. **Run the service as a user account** (not LocalSystem):
+
+```powershell
+sc.exe config WhatsappMessageSender obj= "DOMAIN\svc-whatsapp" password= "YourPassword"
+```
+
+2. **Grant profile folder permissions:**
+
+```powershell
+icacls C:\ProgramData\WhatsappMessageSender /grant "DOMAIN\svc-whatsapp:(OI)(CI)F" /T
+```
+
+3. **Use a dedicated profile** — not your personal Chrome profile:
+
+```json
+"ProfilePath": "C:\\ProgramData\\WhatsappMessageSender\\ChromeProfile"
+```
+
+4. **Log in once interactively** as that user with `"Headless": false`, scan WhatsApp QR, then switch back to `"Headless": true`.
+
+5. **Kill stray Chrome processes** before starting the service:
+
+```powershell
+Get-Process chrome, chromedriver -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+6. Redeploy the latest build — it clears stale `SingletonLock` files and uses `--remote-debugging-pipe` for headless Windows.
+
 ### Chrome / chromedriver version mismatch
 
 Set `"ChromeDriverPath": "auto"` in config. Selenium Manager downloads a driver matching the installed Chrome version.

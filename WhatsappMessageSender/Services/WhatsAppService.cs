@@ -28,8 +28,10 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         _headless = whatsAppSection.GetValue("Headless", IsHeadlessByDefault());
         _sendTimeoutSeconds = Math.Max(10, whatsAppSection.GetValue("SendTimeoutSeconds", 60));
         var hideDriverWindow = whatsAppSection.GetValue("HideDriverWindow", true);
+        var clearProfileLocks = whatsAppSection.GetValue("ClearProfileLocksOnStartup", OperatingSystem.IsWindows());
         var driverPath = whatsAppSection["ChromeDriverPath"] ?? "";
 
+        EnsureProfileDirectoryReady(_profilePath, clearProfileLocks);
         _driver = InitializeDriver(driverPath, hideDriverWindow);
         InitializeWhatsAppWeb();
     }
@@ -56,44 +58,123 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         var options = BuildChromeOptions();
         var trimmed = driverPath.Trim();
 
+        try
+        {
+            return CreateDriverWithPath(trimmed, options, hideDriverWindow);
+        }
+        catch (Exception ex) when (IsChromeStartupCrash(ex))
+        {
+            Console.WriteLine(
+                "Chrome failed to start (common when running as a Windows Service). " +
+                "Clearing stale profile lock files and retrying once…");
+            EnsureProfileDirectoryReady(_profilePath, clearLocks: true);
+            return CreateDriverWithPath(trimmed, options, hideDriverWindow);
+        }
+    }
+
+    private ChromeDriver CreateDriverWithPath(string driverPath, ChromeOptions options, bool hideDriverWindow)
+    {
+        var trimmed = driverPath.Trim();
+
         if (string.IsNullOrEmpty(trimmed) ||
             trimmed.Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine(
                 "WhatsApp:ChromeDriverPath empty or 'auto' — using Selenium Manager (driver matched to installed Chrome).");
-            return CreateChromeDriver(null, options, hideDriverWindow);
+            return CreateChromeDriver(null, options, hideDriverWindow, _profilePath);
         }
 
         try
         {
             var service = CreateChromeDriverService(trimmed, hideDriverWindow);
-            return new ChromeDriver(service, options);
+            return CreateChromeDriver(service, options, hideDriverWindow, _profilePath);
         }
         catch (InvalidOperationException ex) when (IsChromeDriverVersionMismatch(ex))
         {
             Console.WriteLine(
                 "Configured ChromeDriver does not match installed Google Chrome. Retrying with Selenium Manager.");
-            return CreateChromeDriver(null, options, hideDriverWindow);
+            return CreateChromeDriver(null, options, hideDriverWindow, _profilePath);
+        }
+    }
+
+    private static bool IsChromeStartupCrash(Exception ex)
+    {
+        var message = ex.ToString();
+        return message.Contains("DevToolsActivePort", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Chrome failed to start", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("SessionNotCreated", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnsureProfileDirectoryReady(string profilePath, bool clearLocks)
+    {
+        Directory.CreateDirectory(profilePath);
+
+        if (!clearLocks || !OperatingSystem.IsWindows())
+            return;
+
+        foreach (var name in new[] { "SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile" })
+        {
+            TryDeleteFile(Path.Combine(profilePath, name));
+        }
+
+        var defaultProfile = Path.Combine(profilePath, "Default");
+        if (Directory.Exists(defaultProfile))
+        {
+            TryDeleteFile(Path.Combine(defaultProfile, "lockfile"));
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        if (!File.Exists(path))
+            return;
+
+        try
+        {
+            File.Delete(path);
+            Console.WriteLine($"Removed stale Chrome lock file: {path}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not remove Chrome lock file '{path}': {ex.Message}");
         }
     }
 
     private static ChromeDriver CreateChromeDriver(
         ChromeDriverService? service,
         ChromeOptions options,
-        bool hideDriverWindow)
+        bool hideDriverWindow,
+        string profilePath)
     {
-        if (service != null)
+        try
         {
+            if (service != null)
+            {
+                if (OperatingSystem.IsWindows())
+                    service.HideCommandPromptWindow = hideDriverWindow;
+                return new ChromeDriver(service, options);
+            }
+
+            service = ChromeDriverService.CreateDefaultService();
             if (OperatingSystem.IsWindows())
                 service.HideCommandPromptWindow = hideDriverWindow;
             return new ChromeDriver(service, options);
         }
-
-        service = ChromeDriverService.CreateDefaultService();
-        if (OperatingSystem.IsWindows())
-            service.HideCommandPromptWindow = hideDriverWindow;
-        return new ChromeDriver(service, options);
+        catch (Exception ex) when (IsChromeStartupCrash(ex))
+        {
+            throw BuildChromeStartupException(profilePath, ex);
+        }
     }
+
+    private static InvalidOperationException BuildChromeStartupException(string profilePath, Exception ex) =>
+        new(
+            "Chrome failed to start. When running as a Windows Service: " +
+            "(1) run the service under a real user account (not LocalSystem), " +
+            "(2) ensure the service account has Full Control on WhatsApp:ProfilePath, " +
+            "(3) log in to WhatsApp Web once interactively with Headless: false, " +
+            "(4) confirm no other Chrome instance is using the same profile. " +
+            $"ProfilePath: {profilePath}. Inner error: {ex.Message}",
+            ex);
 
     private ChromeOptions BuildChromeOptions()
     {
@@ -104,15 +185,27 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         options.AddArgument("--disable-dev-shm-usage");
         options.AddArgument("--no-sandbox");
         options.AddArgument("--disable-software-rasterizer");
+        options.AddArgument("--no-first-run");
+        options.AddArgument("--no-default-browser-check");
+        options.AddArgument("--disable-extensions");
+        options.AddArgument("--disable-breakpad");
+        options.AddArgument("--remote-allow-origins=*");
 
         if (_headless)
         {
             options.AddArgument("--headless=new");
             options.AddArgument("--window-size=1920,1080");
+            // Pipe mode avoids DevToolsActivePort crashes in headless Windows Service scenarios.
+            options.AddArgument("--remote-debugging-pipe");
         }
         else
         {
             options.AddArgument("--start-maximized");
+        }
+
+        if (OperatingSystem.IsWindows() && _headless)
+        {
+            options.AddArgument("--disable-features=RendererCodeIntegrity,TranslateUI");
         }
 
         var downloadPath = Path.Combine(Path.GetTempPath(), "WhatsAppDownloads");

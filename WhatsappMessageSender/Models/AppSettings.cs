@@ -140,6 +140,10 @@ public class WhatsAppSettings
     /// Max seconds to wait for WhatsApp Web UI elements during send. Headless/service mode often needs 60+.
     /// </summary>
     public int SendTimeoutSeconds { get; set; } = 60;
+    /// <summary>
+    /// Delete stale Chrome SingletonLock/lockfile entries before startup (recommended on Windows Service).
+    /// </summary>
+    public bool ClearProfileLocksOnStartup { get; set; } = true;
 }
 
 public class ErpInstanceConfig
