@@ -137,6 +137,15 @@ public class QueueProcessor : IMessageProcessor
         {
             Console.WriteLine("Warning: ServiceBus:Topics is empty — no subscriptions will receive messages.");
         }
+
+        if (maxConcurrent > 1 &&
+            serviceBusSettings.Topics.Any(t => t.RequiresSession))
+        {
+            Console.WriteLine(
+                "Warning: ServiceBus:MaxConcurrentCalls is " + maxConcurrent +
+                " but WhatsApp sends are serialized to one Chrome session. " +
+                "Use MaxConcurrentCalls: 1 to avoid session lock expiry while messages wait in the priority queue.");
+        }
     }
 
     public async Task CloseAsync()

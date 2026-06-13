@@ -136,6 +136,10 @@ public class WhatsAppSettings
     /// Hide the chromedriver console window on Windows (recommended for services).
     /// </summary>
     public bool HideDriverWindow { get; set; } = true;
+    /// <summary>
+    /// Max seconds to wait for WhatsApp Web UI elements during send. Headless/service mode often needs 60+.
+    /// </summary>
+    public int SendTimeoutSeconds { get; set; } = 60;
 }
 
 public class ErpInstanceConfig

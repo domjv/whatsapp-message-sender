@@ -19,12 +19,14 @@ public class WhatsAppService : IWhatsAppService, IDisposable
     private readonly ChromeDriver _driver;
     private readonly string _profilePath;
     private readonly bool _headless;
+    private readonly int _sendTimeoutSeconds;
 
     public WhatsAppService(IConfiguration configuration)
     {
         var whatsAppSection = configuration.GetSection("WhatsApp");
         _profilePath = GetPlatformSpecificProfilePath(whatsAppSection["ProfilePath"] ?? throw new InvalidOperationException("WhatsApp:ProfilePath is required."));
         _headless = whatsAppSection.GetValue("Headless", IsHeadlessByDefault());
+        _sendTimeoutSeconds = Math.Max(10, whatsAppSection.GetValue("SendTimeoutSeconds", 60));
         var hideDriverWindow = whatsAppSection.GetValue("HideDriverWindow", true);
         var driverPath = whatsAppSection["ChromeDriverPath"] ?? "";
 
@@ -206,7 +208,7 @@ public class WhatsAppService : IWhatsAppService, IDisposable
     {
         try
         {
-            var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(30))
+            var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(_sendTimeoutSeconds))
             {
                 PollingInterval = TimeSpan.FromMilliseconds(500)
             };
@@ -275,7 +277,7 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error sending WhatsApp message: {ex.Message}");
+            Console.WriteLine($"Error sending WhatsApp message to {phoneNumber}: {ex.Message}");
             return new SendMessageResult
             {
                 Success = false,
