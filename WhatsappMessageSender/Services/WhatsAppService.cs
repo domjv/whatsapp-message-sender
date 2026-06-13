@@ -20,6 +20,7 @@ public class WhatsAppService : IWhatsAppService, IDisposable
     private readonly string _profilePath;
     private readonly bool _headless;
     private readonly int _sendTimeoutSeconds;
+    private readonly int _sessionReadyTimeoutSeconds;
 
     public WhatsAppService(IConfiguration configuration)
     {
@@ -27,11 +28,13 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         _profilePath = GetPlatformSpecificProfilePath(whatsAppSection["ProfilePath"] ?? throw new InvalidOperationException("WhatsApp:ProfilePath is required."));
         _headless = whatsAppSection.GetValue("Headless", IsHeadlessByDefault());
         _sendTimeoutSeconds = Math.Max(10, whatsAppSection.GetValue("SendTimeoutSeconds", 60));
+        _sessionReadyTimeoutSeconds = Math.Max(30, whatsAppSection.GetValue("SessionReadyTimeoutSeconds", 120));
         var hideDriverWindow = whatsAppSection.GetValue("HideDriverWindow", true);
         var clearProfileLocks = whatsAppSection.GetValue("ClearProfileLocksOnStartup", OperatingSystem.IsWindows());
+        var killStaleProcesses = whatsAppSection.GetValue("KillStaleChromeProcessesOnStartup", OperatingSystem.IsWindows());
         var driverPath = whatsAppSection["ChromeDriverPath"] ?? "";
 
-        EnsureProfileDirectoryReady(_profilePath, clearProfileLocks);
+        ChromeProfileCleanup.PrepareProfile(_profilePath, clearProfileLocks, killStaleProcesses);
         _driver = InitializeDriver(driverPath, hideDriverWindow);
         InitializeWhatsAppWeb();
     }
@@ -67,7 +70,7 @@ public class WhatsAppService : IWhatsAppService, IDisposable
             Console.WriteLine(
                 "Chrome failed to start (common when running as a Windows Service). " +
                 "Clearing stale profile lock files and retrying once…");
-            EnsureProfileDirectoryReady(_profilePath, clearLocks: true);
+            ChromeProfileCleanup.PrepareProfile(_profilePath, clearLocks: true, killStaleProcesses: true);
             return CreateDriverWithPath(trimmed, options, hideDriverWindow);
         }
     }
@@ -103,41 +106,6 @@ public class WhatsAppService : IWhatsAppService, IDisposable
         return message.Contains("DevToolsActivePort", StringComparison.OrdinalIgnoreCase)
             || message.Contains("Chrome failed to start", StringComparison.OrdinalIgnoreCase)
             || message.Contains("SessionNotCreated", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static void EnsureProfileDirectoryReady(string profilePath, bool clearLocks)
-    {
-        Directory.CreateDirectory(profilePath);
-
-        if (!clearLocks || !OperatingSystem.IsWindows())
-            return;
-
-        foreach (var name in new[] { "SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile" })
-        {
-            TryDeleteFile(Path.Combine(profilePath, name));
-        }
-
-        var defaultProfile = Path.Combine(profilePath, "Default");
-        if (Directory.Exists(defaultProfile))
-        {
-            TryDeleteFile(Path.Combine(defaultProfile, "lockfile"));
-        }
-    }
-
-    private static void TryDeleteFile(string path)
-    {
-        if (!File.Exists(path))
-            return;
-
-        try
-        {
-            File.Delete(path);
-            Console.WriteLine($"Removed stale Chrome lock file: {path}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Could not remove Chrome lock file '{path}': {ex.Message}");
-        }
     }
 
     private static ChromeDriver CreateChromeDriver(
@@ -274,10 +242,11 @@ public class WhatsAppService : IWhatsAppService, IDisposable
 
         if (_headless)
         {
-            Console.WriteLine("Starting WhatsApp Web in headless mode — waiting for an existing session…");
+            Console.WriteLine(
+                $"Starting WhatsApp Web in headless mode — waiting up to {_sessionReadyTimeoutSeconds}s for an existing session…");
             try
             {
-                var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(90));
+                var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(_sessionReadyTimeoutSeconds));
                 wait.Until(d =>
                     d.FindElements(By.XPath("//div[@id='pane-side']")).Count > 0
                     || d.FindElements(By.XPath("//div[@contenteditable='true' and @aria-placeholder='Type a message']")).Count > 0);
@@ -286,8 +255,9 @@ public class WhatsAppService : IWhatsAppService, IDisposable
             catch (WebDriverTimeoutException)
             {
                 throw new InvalidOperationException(
-                    "WhatsApp Web is not logged in. Run the app once interactively (Headless: false) " +
-                    "with the same WhatsApp:ProfilePath, scan the QR code, then restart with Headless: true.");
+                    $"WhatsApp Web did not become ready within {_sessionReadyTimeoutSeconds}s. " +
+                    "Run the app once interactively (Headless: false) with the same WhatsApp:ProfilePath, " +
+                    "scan the QR code, then restart with Headless: true.");
             }
             return;
         }

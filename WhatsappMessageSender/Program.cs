@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Configuration;
+﻿using System.Threading;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -15,6 +16,14 @@ class Program
 
     static async Task Main(string[] args)
     {
+        using var singleInstance = AcquireSingleInstanceMutex();
+        if (singleInstance is null)
+        {
+            Console.Error.WriteLine(
+                "Another WhatsappMessageSender instance is already running. Exiting.");
+            return;
+        }
+
         var builder = Host.CreateApplicationBuilder(args);
 
         var logDirectory = LoggingBootstrap.Configure(builder.Configuration);
@@ -60,5 +69,20 @@ class Program
 
         var host = builder.Build();
         await host.RunAsync();
+    }
+
+    private static Mutex? AcquireSingleInstanceMutex()
+    {
+        var mutexName = OperatingSystem.IsWindows()
+            ? "Global\\WhatsappMessageSender.SingleInstance"
+            : "WhatsappMessageSender.SingleInstance";
+
+        var created = false;
+        var mutex = new Mutex(initiallyOwned: true, mutexName, out created);
+        if (created)
+            return mutex;
+
+        mutex.Dispose();
+        return null;
     }
 }

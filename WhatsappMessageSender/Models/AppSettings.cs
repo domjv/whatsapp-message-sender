@@ -144,6 +144,14 @@ public class WhatsAppSettings
     /// Delete stale Chrome SingletonLock/lockfile entries before startup (recommended on Windows Service).
     /// </summary>
     public bool ClearProfileLocksOnStartup { get; set; } = true;
+    /// <summary>
+    /// Stop leftover chrome/chromedriver processes that block the profile lock on startup.
+    /// </summary>
+    public bool KillStaleChromeProcessesOnStartup { get; set; } = true;
+    /// <summary>
+    /// Seconds to wait for an existing WhatsApp Web session when Headless is true.
+    /// </summary>
+    public int SessionReadyTimeoutSeconds { get; set; } = 120;
 }
 
 public class ErpInstanceConfig
