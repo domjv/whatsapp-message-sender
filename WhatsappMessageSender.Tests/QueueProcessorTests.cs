@@ -27,6 +27,7 @@ public class QueueProcessorTests
     private readonly Mock<IWhatsAppService> _whatsAppMock = new();
     private readonly Mock<IBlobStorageService> _blobMock = new();
     private readonly Mock<IMessageTrackingService> _trackingMock = new();
+    private readonly Mock<IWhatsAppApiTemplateService> _whatsAppApiMock = new();
 
     // Capture calls to the Func delegates
     private bool _completed;
@@ -41,7 +42,8 @@ public class QueueProcessorTests
             _whatsAppMock.Object,
             _blobMock.Object,
             _trackingMock.Object,
-            NullWhatsAppSendRateLimiter.Instance);
+            NullWhatsAppSendRateLimiter.Instance,
+            _whatsAppApiMock.Object);
     }
 
     private IConfiguration BuildConfiguration()
@@ -59,7 +61,9 @@ public class QueueProcessorTests
             ["WhatsApp:ProfilePath"]                       = "/tmp",
             ["WhatsApp:ChromeDriverPath"]                  = "/tmp",
             ["MessageTracking:ApiUrl"]                     = "http://localhost",
-            ["MessageTracking:NotificationSecret"]         = "secret"
+            ["MessageTracking:NotificationSecret"]         = "secret",
+            ["ServiceBus:Topics:0:WhatsAppApi:UseWhatsAppApi"]    = "false",
+            ["ServiceBus:Topics:0:WhatsAppApi:TemplateName"] = "attendance_status"
         };
         return new ConfigurationBuilder()
             .AddInMemoryCollection(dict)
@@ -119,6 +123,54 @@ public class QueueProcessorTests
         Assert.Null(_abandonedProps);
         _trackingMock.Verify(t => t.TrackMessageStatusAsync(
             QueueName, "MSG-001", "Sent", null, null, It.IsAny<DateTime?>()), Times.Once);
+    }
+
+
+    [Fact]
+    public async Task ProcessCore_WhatsAppApiTopic_UsesCloudApiAndSkipsExistingFlow()
+    {
+        // Arrange
+        var config = BuildConfiguration();
+        config["ServiceBus:Topics:0:WhatsAppApi:UseWhatsAppApi"] = "true";
+        var msg = new WhatsAppMessage
+        {
+            Name = "MSG-API-001",
+            Phone = "919876543210",
+            Message = "Hello",
+            MessageName = "MSG-API-001",
+            AttachmentUrl = "https://example.blob.core.windows.net/container/file.pdf"
+        };
+        _whatsAppApiMock
+            .Setup(s => s.SendTemplateMessageAsync(
+                It.IsAny<WhatsAppMessage>(),
+                It.IsAny<WhatsAppApiChannelSettings>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SendMessageResult { Success = true, ProviderMessageId = "wamid.test" });
+
+        var processor = new QueueProcessor(
+            config,
+            _whatsAppMock.Object,
+            _blobMock.Object,
+            _trackingMock.Object,
+            NullWhatsAppSendRateLimiter.Instance,
+            _whatsAppApiMock.Object);
+
+        // Act
+        await processor.ProcessMessageCoreAsync(
+            messageId: "msg-id-api", messageBody: Serialize(msg), deliveryCount: 1,
+            queueName: QueueName, messageType: "whatsapp", messageName: "MSG-API-001",
+            completeAsync: CompleteFunc(), deadLetterAsync: DeadLetterFunc(), abandonAsync: AbandonFunc());
+
+        // Assert
+        Assert.True(_completed);
+        _whatsAppApiMock.Verify(s => s.SendTemplateMessageAsync(
+            It.Is<WhatsAppMessage>(m => m.Phone == "919876543210"),
+            It.Is<WhatsAppApiChannelSettings>(c => c.TemplateName == "attendance_status"),
+            It.IsAny<CancellationToken>()), Times.Once);
+        _whatsAppMock.Verify(s => s.SendMessageAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+        _blobMock.Verify(b => b.DownloadFileAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+        _trackingMock.Verify(t => t.TrackMessageStatusAsync(
+            QueueName, "MSG-API-001", "Sent", null, "wamid.test", It.IsAny<DateTime?>()), Times.Once);
     }
 
     // -------------------------------------------------------------------------

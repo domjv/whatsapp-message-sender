@@ -19,6 +19,7 @@ public class QueueProcessor : IMessageProcessor
     private readonly IMessageTrackingService _messageTrackingService;
     private readonly Dictionary<string, string> _topicContainerMapping;
     private readonly Dictionary<string, int> _topicPriorityMapping;
+    private readonly Dictionary<string, WhatsAppApiChannelSettings> _topicWhatsAppApiMapping;
     private readonly PriorityQueue<PendingMessage, (int Priority, long Sequence)> _pendingMessages = new();
     private readonly SemaphoreSlim _pendingSignal = new(0);
     private readonly object _pendingLock = new();
@@ -32,13 +33,15 @@ public class QueueProcessor : IMessageProcessor
     // Selenium/WhatsApp Web driver is single-session and not thread-safe.
     private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
     private readonly IWhatsAppSendRateLimiter _whatsAppSendRateLimiter;
+    private readonly IWhatsAppApiTemplateService _whatsAppApiTemplateService;
 
     public QueueProcessor(
         IConfiguration configuration,
         IWhatsAppService whatsAppService,
         IBlobStorageService blobStorageService,
         IMessageTrackingService messageTrackingService,
-        IWhatsAppSendRateLimiter whatsAppSendRateLimiter)
+        IWhatsAppSendRateLimiter whatsAppSendRateLimiter,
+        IWhatsAppApiTemplateService whatsAppApiTemplateService)
     {
         _appSettings = configuration.Get<AppSettings>()
             ?? throw new InvalidOperationException("Invalid configuration");
@@ -51,12 +54,17 @@ public class QueueProcessor : IMessageProcessor
         _blobStorageService = blobStorageService;
         _messageTrackingService = messageTrackingService;
         _whatsAppSendRateLimiter = whatsAppSendRateLimiter;
+        _whatsAppApiTemplateService = whatsAppApiTemplateService;
         _topicContainerMapping = _appSettings.ServiceBus.Topics
             .GroupBy(t => t.TopicName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().ContainerName, StringComparer.OrdinalIgnoreCase);
         _topicPriorityMapping = _appSettings.ServiceBus.Topics
             .GroupBy(t => t.TopicName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().Priority, StringComparer.OrdinalIgnoreCase);
+        _topicWhatsAppApiMapping = _appSettings.ServiceBus.Topics
+            .Where(t => t.WhatsAppApi?.IsEnabled == true)
+            .GroupBy(t => t.TopicName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().WhatsAppApi!, StringComparer.OrdinalIgnoreCase);
 
         var transport = _appSettings.ServiceBus.UseWebSocketsTransport
             ? ServiceBusTransportType.AmqpWebSockets
@@ -403,29 +411,37 @@ public class QueueProcessor : IMessageProcessor
                 return;
             }
 
-            string? filePath = null;
-            if (!string.IsNullOrEmpty(msg.AttachmentUrl) &&
-                _topicContainerMapping.TryGetValue(messageProperties.ChannelName, out var containerName))
-            {
-                filePath = await _blobStorageService.DownloadFileAsync(
-                    msg.AttachmentUrl, msg.Name, containerName);
-            }
-
             SendMessageResult sendResult;
-            await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
-            try
+            if (_topicWhatsAppApiMapping.TryGetValue(messageProperties.ChannelName, out var apiChannelSettings))
             {
-                await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
-                sendResult = await _whatsAppService.SendMessageAsync(
-                    msg.Phone, msg.Message, filePath);
-                if (sendResult.Success)
-                {
-                    _whatsAppSendRateLimiter.NotifySuccessfulSendIfThrottled(dispatchPriority);
-                }
+                sendResult = await _whatsAppApiTemplateService.SendTemplateMessageAsync(
+                    msg, apiChannelSettings, cancellationToken);
             }
-            finally
+            else
             {
-                _whatsAppSendSemaphore.Release();
+                string? filePath = null;
+                if (!string.IsNullOrEmpty(msg.AttachmentUrl) &&
+                    _topicContainerMapping.TryGetValue(messageProperties.ChannelName, out var containerName))
+                {
+                    filePath = await _blobStorageService.DownloadFileAsync(
+                        msg.AttachmentUrl, msg.Name, containerName);
+                }
+
+                await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
+                try
+                {
+                    await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
+                    sendResult = await _whatsAppService.SendMessageAsync(
+                        msg.Phone, msg.Message, filePath);
+                    if (sendResult.Success)
+                    {
+                        _whatsAppSendRateLimiter.NotifySuccessfulSendIfThrottled(dispatchPriority);
+                    }
+                }
+                finally
+                {
+                    _whatsAppSendSemaphore.Release();
+                }
             }
 
             if (sendResult.Success)

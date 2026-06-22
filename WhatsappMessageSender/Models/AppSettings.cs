@@ -15,6 +15,10 @@ public class AppSettings
     /// attachment downloads are skipped (messages without attachments still work).
     /// </summary>
     public BlobStorageSettings? BlobStorage { get; set; }
+    /// <summary>
+    /// Optional WhatsApp Cloud API credentials used only by streams/topics configured with UseWhatsAppApi.
+    /// </summary>
+    public WhatsAppCloudApiSettings? WhatsAppCloudApi { get; set; }
     public WhatsAppSettings WhatsApp { get; set; } = null!;
     /// <summary>
     /// Optional. When null, defaults apply: priorities &lt; 10 are unlimited, others capped at 20/minute.
@@ -76,6 +80,8 @@ public class StreamConfig
     /// Same semantics as Service Bus topic <see cref="TopicSubscriptionConfig.Priority"/>; used for send throttling.
     /// </summary>
     public int Priority { get; set; } = 100;
+    /// <summary>When set, this stream bypasses WhatsApp Web/Selenium and sends an approved template through the WhatsApp Cloud API.</summary>
+    public WhatsAppApiChannelSettings? WhatsAppApi { get; set; }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +119,8 @@ public class TopicSubscriptionConfig
     /// Lower values are processed first. Use 0 for highest priority topics.
     /// </summary>
     public int Priority { get; set; } = 100;
+    /// <summary>When set, this topic bypasses WhatsApp Web/Selenium and sends an approved template through the WhatsApp Cloud API.</summary>
+    public WhatsAppApiChannelSettings? WhatsAppApi { get; set; }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +130,28 @@ public class TopicSubscriptionConfig
 public class BlobStorageSettings
 {
     public string ConnectionString { get; set; } = null!;
+}
+
+
+public class WhatsAppCloudApiSettings
+{
+    public string ApiBaseUrl { get; set; } = "https://graph.facebook.com";
+    public string ApiVersion { get; set; } = "v20.0";
+    public string PhoneNumberId { get; set; } = string.Empty;
+    public string AccessToken { get; set; } = string.Empty;
+}
+
+public class WhatsAppApiChannelSettings
+{
+    public bool UseWhatsAppApi { get; set; }
+    public bool Enabled { get; set; }
+    public bool IsEnabled => UseWhatsAppApi || Enabled;
+    public string TemplateName { get; set; } = string.Empty;
+    public string LanguageCode { get; set; } = "en";
+    /// <summary>Ordered body parameter names as approved in Meta. Prefer explicit values in the payload when available.</summary>
+    public List<string> TemplateParameters { get; set; } = [];
+    /// <summary>Optional rendered template text used to extract parameter values from legacy message bodies.</summary>
+    public string? TemplateBody { get; set; }
 }
 
 public class WhatsAppSettings

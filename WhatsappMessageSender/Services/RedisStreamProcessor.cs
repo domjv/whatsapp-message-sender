@@ -33,7 +33,9 @@ public class RedisStreamProcessor : IMessageProcessor
     private readonly IMessageTrackingService _messageTrackingService;
     private readonly Dictionary<string, string> _streamContainerMapping;
     private readonly Dictionary<string, int> _streamPriorityMapping;
+    private readonly Dictionary<string, WhatsAppApiChannelSettings> _streamWhatsAppApiMapping;
     private readonly IWhatsAppSendRateLimiter _whatsAppSendRateLimiter;
+    private readonly IWhatsAppApiTemplateService _whatsAppApiTemplateService;
     private readonly SemaphoreSlim _globalProcessingSemaphore;
     // Global one-at-a-time guard for Selenium send calls.
     private readonly SemaphoreSlim _whatsAppSendSemaphore = new(1, 1);
@@ -53,7 +55,8 @@ public class RedisStreamProcessor : IMessageProcessor
         IWhatsAppService whatsAppService,
         IBlobStorageService blobStorageService,
         IMessageTrackingService messageTrackingService,
-        IWhatsAppSendRateLimiter whatsAppSendRateLimiter)
+        IWhatsAppSendRateLimiter whatsAppSendRateLimiter,
+        IWhatsAppApiTemplateService whatsAppApiTemplateService)
     {
         _appSettings = configuration.Get<AppSettings>()
             ?? throw new InvalidOperationException("Invalid configuration");
@@ -66,10 +69,14 @@ public class RedisStreamProcessor : IMessageProcessor
         _blobStorageService = blobStorageService;
         _messageTrackingService = messageTrackingService;
         _whatsAppSendRateLimiter = whatsAppSendRateLimiter;
+        _whatsAppApiTemplateService = whatsAppApiTemplateService;
         _streamContainerMapping = _appSettings.Redis.Streams
             .ToDictionary(s => s.StreamName, s => s.ContainerName);
         _streamPriorityMapping = _appSettings.Redis.Streams
             .ToDictionary(s => s.StreamName, s => s.Priority);
+        _streamWhatsAppApiMapping = _appSettings.Redis.Streams
+            .Where(s => s.WhatsAppApi?.IsEnabled == true)
+            .ToDictionary(s => s.StreamName, s => s.WhatsAppApi!);
         _globalProcessingSemaphore = new SemaphoreSlim(
             Math.Max(1, _appSettings.Redis.MaxConcurrentCalls));
     }
@@ -84,7 +91,8 @@ public class RedisStreamProcessor : IMessageProcessor
         IBlobStorageService blobStorageService,
         IMessageTrackingService messageTrackingService,
         IDatabase database,
-        IWhatsAppSendRateLimiter? whatsAppSendRateLimiter = null)
+        IWhatsAppSendRateLimiter? whatsAppSendRateLimiter = null,
+        IWhatsAppApiTemplateService? whatsAppApiTemplateService = null)
     {
         _appSettings = appSettings;
         _whatsAppService = whatsAppService;
@@ -92,10 +100,14 @@ public class RedisStreamProcessor : IMessageProcessor
         _messageTrackingService = messageTrackingService;
         _db = database;
         _whatsAppSendRateLimiter = whatsAppSendRateLimiter ?? NullWhatsAppSendRateLimiter.Instance;
+        _whatsAppApiTemplateService = whatsAppApiTemplateService ?? new NullWhatsAppApiTemplateService();
         _streamContainerMapping = appSettings.Redis!.Streams
             .ToDictionary(s => s.StreamName, s => s.ContainerName);
         _streamPriorityMapping = appSettings.Redis.Streams
             .ToDictionary(s => s.StreamName, s => s.Priority);
+        _streamWhatsAppApiMapping = appSettings.Redis.Streams
+            .Where(s => s.WhatsAppApi?.IsEnabled == true)
+            .ToDictionary(s => s.StreamName, s => s.WhatsAppApi!);
         _globalProcessingSemaphore = new SemaphoreSlim(
             Math.Max(1, appSettings.Redis.MaxConcurrentCalls));
     }
@@ -407,29 +419,37 @@ public class RedisStreamProcessor : IMessageProcessor
 
             backendMessageId = whatsAppMessage.MessageId ?? messageName;
 
-            string? filePath = null;
-            if (!string.IsNullOrEmpty(whatsAppMessage.AttachmentUrl) &&
-                _streamContainerMapping.TryGetValue(messageProperties.ChannelName, out var containerName))
-            {
-                filePath = await _blobStorageService.DownloadFileAsync(
-                    whatsAppMessage.AttachmentUrl, whatsAppMessage.Name, containerName);
-            }
-
             SendMessageResult sendResult;
-            await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
-            try
+            if (_streamWhatsAppApiMapping.TryGetValue(messageProperties.ChannelName, out var apiChannelSettings))
             {
-                await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
-                sendResult = await _whatsAppService.SendMessageAsync(
-                    whatsAppMessage.Phone, whatsAppMessage.Message, filePath);
-                if (sendResult.Success)
-                {
-                    _whatsAppSendRateLimiter.NotifySuccessfulSendIfThrottled(dispatchPriority);
-                }
+                sendResult = await _whatsAppApiTemplateService.SendTemplateMessageAsync(
+                    whatsAppMessage, apiChannelSettings, cancellationToken);
             }
-            finally
+            else
             {
-                _whatsAppSendSemaphore.Release();
+                string? filePath = null;
+                if (!string.IsNullOrEmpty(whatsAppMessage.AttachmentUrl) &&
+                    _streamContainerMapping.TryGetValue(messageProperties.ChannelName, out var containerName))
+                {
+                    filePath = await _blobStorageService.DownloadFileAsync(
+                        whatsAppMessage.AttachmentUrl, whatsAppMessage.Name, containerName);
+                }
+
+                await _whatsAppSendSemaphore.WaitAsync(cancellationToken);
+                try
+                {
+                    await _whatsAppSendRateLimiter.WaitForSendSlotAsync(dispatchPriority, cancellationToken);
+                    sendResult = await _whatsAppService.SendMessageAsync(
+                        whatsAppMessage.Phone, whatsAppMessage.Message, filePath);
+                    if (sendResult.Success)
+                    {
+                        _whatsAppSendRateLimiter.NotifySuccessfulSendIfThrottled(dispatchPriority);
+                    }
+                }
+                finally
+                {
+                    _whatsAppSendSemaphore.Release();
+                }
             }
 
             if (sendResult.Success)

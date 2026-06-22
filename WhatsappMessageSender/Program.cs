@@ -49,6 +49,10 @@ class Program
         builder.Services.AddSingleton<IWhatsAppService, WhatsAppService>();
         builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
         builder.Services.AddSingleton<IMessageTrackingService, MessageTrackingService>();
+        builder.Services.AddSingleton<IWhatsAppApiTemplateService>(sp =>
+            new WhatsAppApiTemplateService(
+                new HttpClient(),
+                sp.GetRequiredService<IOptions<AppSettings>>()));
         builder.Services.AddSingleton<IWhatsAppSendRateLimiter>(sp =>
         {
             var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
