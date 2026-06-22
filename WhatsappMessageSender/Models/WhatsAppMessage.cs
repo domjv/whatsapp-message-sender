@@ -11,4 +11,5 @@ public class WhatsAppMessage
     [JsonProperty("message_id")]
     public string? MessageId { get; set; }
     public string? MessageName { get; set; }
+    public Dictionary<string, string>? TemplateParameters { get; set; }
 }

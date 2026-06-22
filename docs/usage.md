@@ -245,3 +245,47 @@ Tests cover message processors, tracking routing, and rate limiting. They do not
 - [Setup guide](setup.md) — initial installation and configuration
 - [Windows Service guide](windows-service.md) — headless production deployment
 - [Architecture](architecture.md) — internal design
+
+## WhatsApp Cloud API template delivery
+
+A stream or Service Bus topic can bypass the Selenium/WhatsApp Web sender and use the official WhatsApp Cloud API instead. Configure the shared Cloud API credentials in `WhatsAppCloudApi`, then set `WhatsAppApi:UseWhatsAppApi` on only the streams/topics that should use the official API.
+
+When `UseWhatsAppApi` is true, the processor does not download attachments and does not call the existing WhatsApp Web flow. It sends an approved template message to Meta's `/messages` endpoint and stores the returned provider message id when Meta returns one.
+
+Example topic configuration:
+
+```json
+{
+  "WhatsAppCloudApi": {
+    "ApiBaseUrl": "https://graph.facebook.com",
+    "ApiVersion": "v20.0",
+    "PhoneNumberId": "REPLACE_WITH_META_PHONE_NUMBER_ID",
+    "AccessToken": "REPLACE_WITH_META_ACCESS_TOKEN"
+  },
+  "ServiceBus": {
+    "Topics": [
+      {
+        "TopicName": "hm-ajk-attendance",
+        "SubscriptionName": "whatsapp-message-sender",
+        "ContainerName": "ajk-attachments",
+        "WhatsAppApi": {
+          "UseWhatsAppApi": true,
+          "TemplateName": "attendance_status",
+          "LanguageCode": "en",
+          "TemplateParameters": [
+            "student_name",
+            "receiver_name",
+            "student_name",
+            "attendance_status",
+            "attendance_date",
+            "portal_sub_domain",
+            "hostel_name"
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+Template values can be supplied in the message payload as `TemplateParameters`, `template_parameters`, `templateParameters`, or `parameters`. If explicit values are absent, the optional configured `TemplateBody` is used to extract parameter values from the rendered legacy message text.
